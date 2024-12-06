@@ -1,3 +1,6 @@
+import math
+import numpy as np
+
 class Value:
     """stores a single scalar value and its gradient"""
     
@@ -102,3 +105,4 @@ class Value:
         self.grad = 1.0
         for node in reversed(topo):
             node._backward()
+            
