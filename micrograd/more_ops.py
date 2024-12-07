@@ -105,7 +105,7 @@ def transpose_tensor_final_dims(x):
     # Recursively apply the transpose operation to the final two dimensions
     return recursive_transpose(x)
 
-def tensor_transpose_arbitrary(x, dims: tuple):
+def tensor_transpose(x, dims: tuple):
     """
     Transpose any arbitrary two dimensions of a nested list of Value objects
     
@@ -213,6 +213,71 @@ def tensor_entry_wise_add(x, y):
     # Recursively apply the entry-wise addition operation to the final dimension
     return recursive_entry_wise_add(x, y)
 
+def tensor_matmul(x, y):
+    """
+    Perform a matrix multiplication over the last two dimensions of two tensors (lists of lists of ... of Value objects).
+
+    Shape constraints:
+    - Let x have shape: [..., M, N]
+    - Let y have shape: [..., N, P]
+    
+    The leading dimensions (everything except the last two) must match.
+    The result will have shape: [..., M, P].
+    """
+
+    # Get the shape of a nested list
+    def get_shape(tensor):
+        shape = []
+        pointer = tensor
+        while isinstance(pointer, list) and len(pointer) > 0:
+            shape.append(len(pointer))
+            pointer = pointer[0]
+        return shape
+
+    x_shape = get_shape(x)
+    y_shape = get_shape(y)
+
+    assert len(x_shape) >= 2 and len(y_shape) >= 2, "tensors must have at least 2D for matrix multiplication."
+    assert x_shape[-1] == y_shape[-2], f"Inner dimensions must match: got {x_shape[-1]} and {y_shape[-2]}."
+    if len(x_shape) > 2 or len(y_shape) > 2:
+        # For higher dimensional tensors, the leading dimensions (all but the last two) must be identical
+        assert x_shape[:-2] == y_shape[:-2], f"Leading dimensions must match, got {x_shape[:-2]} and {y_shape[:-2]}"
+    
+    M, N = x_shape[-2], x_shape[-1]
+    P = y_shape[-1]
+
+    # Function to multiply two 2D matrices of Value objects
+    def matmul_2d(a, b):
+        '''
+        MxN @ NxP -> MxP
+        '''
+        out = []
+        for i in range(M):
+            row = []
+            for j in range(P):
+                # Compute sum over k of a[i,k]*b[k,j]
+                val = a[i][0] * b[0][j]
+                for k in range(1, N):
+                    val = val + (a[i][k] * b[k][j])
+                row.append(val)
+            out.append(row)
+        return out
+
+    # If we only have 2D matrices, just do matmul directly
+    if len(x_shape) == 2 and len(y_shape) == 2:
+        return matmul_2d(x, y)
+
+    # For higher dimensions, we recursively apply matmul across the leading dimensions
+    def recurse_mm(subx, suby):
+        # If not at the final 2D level, keep recursing
+        if isinstance(subx[0], list) and isinstance(subx[0][0], list):
+            return [recurse_mm(x_elem, y_elem) for x_elem, y_elem in zip(subx, suby)]
+        else:
+            # At the 2D base case
+            return matmul_2d(subx, suby)
+
+    return recurse_mm(x, y)
+
 if __name__ == "__main__":
     batch_size = 2
     seq_len = 3
@@ -284,7 +349,7 @@ if __name__ == "__main__":
      for _ in range(batch_size)]
     pretty_print_tensor(x)
     print('\n')
-    y = tensor_transpose_arbitrary(x, dims=(0, 2))
+    y = tensor_transpose(x, dims=(0, 2))
     pretty_print_tensor(y)
 
     ### test entry-wise addition
@@ -298,3 +363,27 @@ if __name__ == "__main__":
     pretty_print_tensor(y)
     z = tensor_entry_wise_add(x, y)
     pretty_print_tensor(z)
+
+    ### test tensor matmul
+    q = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
+       for _ in range(seq_len)]
+      for _ in range(num_heads)]
+     for _ in range(batch_size)]
+    pretty_print_tensor(q)
+    print('\n\n')
+    k = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
+           for _ in range(seq_len)]
+          for _ in range(num_heads)]
+         for _ in range(batch_size)]
+    v = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
+           for _ in range(seq_len)]
+          for _ in range(num_heads)]
+         for _ in range(batch_size)]
+    k_transpose = tensor_transpose(k, dims=(2,3))
+    pretty_print_tensor(k_transpose)
+    print('\n\n')
+    logits = tensor_matmul(q, k_transpose)
+    pretty_print_tensor(logits)
+    print('\n\n')
+    out = tensor_matmul(logits, v)
+    pretty_print_tensor(out)
