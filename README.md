@@ -1,2 +1,2 @@
-# micrograd
-refreshing myself on [Karpathy's lectures](https://youtu.be/VMj-3S1tku0?si=FM0qtfV-cvXr2kDJ) up to but not including his GPT2 replication. the math is easy but idk how to code
+# autograd_engine_tutorial
+the plan for this repo is to first expand upon [karpathy's `micrograd`](https://youtu.be/VMj-3S1tku0?si=FM0qtfV-cvXr2kDJ) by making this from-scratch-in-raw-python system fully implement a GPT, not just an MLP. then, I'd like to expand it into a from-scratch-in-numpy version called `minigrad/`. Finally, and this is even less likely to get finished, I'd like to learn CUDA and implement a `grad` folder with a full simple transformer from scratch. For that last one I'm hoping that instead of learning all of C/C++ in order to then learn CUDA i can instead use one of these libraries like PyCUDA to only learn straight up CUDA. 
