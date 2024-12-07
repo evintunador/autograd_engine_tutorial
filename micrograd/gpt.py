@@ -68,7 +68,7 @@ def layer_norm(x):
 
     return out
 
-def transpose(x):
+def transpose_matrix(x):
     '''
     input: x - list of lists of Value objects where first list is length m and second is length n
     output: new_matrix - list of lists of Value objects where first list is length n and second is length m
@@ -80,7 +80,7 @@ def transpose(x):
             new_matrix[j][i] = x[i][j]
     return new_matrix
 
-def transpose_tensor(x):
+def transpose_tensor_final_dims(x):
     '''
     input: x - list of lists of .... of Value objects
     output: out - list of lists of .... of Value objects where the final two dimensions are transposed
@@ -100,10 +100,87 @@ def transpose_tensor(x):
         if isinstance(sub_tensor[0][0], list):
             return [recursive_transpose(sub_part) for sub_part in sub_tensor]
         else: # Base case: when the tensor has only two dimensions
-            return transpose(sub_tensor)
+            return transpose_2dim(sub_tensor)
 
     # Recursively apply the transpose operation to the final two dimensions
     return recursive_transpose(x)
+
+def tensor_transpose_arbitrary(x, dims: tuple):
+    """
+    Transpose any arbitrary two dimensions of a nested list of Value objects
+    
+    Inputs:
+        x : nested list of Value objects
+        dims : tuple - The two dimension indices to transpose
+        
+    out : nested list of Value objects with the specified dimensions swapped.
+    """
+    if dims[0] == dims[1]:
+        # No change if the dimensions are the same
+        return x
+    
+    # Get the shape of the tensor
+    shape = []
+    pointer = x[:]
+    while isinstance(pointer, list):
+        shape.append(len(pointer))
+        pointer = pointer[0] if len(pointer) > 0 else None
+        if pointer is None:
+            break
+    ndims = len(shape)
+
+    assert ndims >= 0, "x must have at least 2 dimensions to transpose."
+    assert 0 <= dims[0] < ndims and 0 <= dims[1] < ndims, f"Dimension indices {dims} out of range."
+    
+    # Create the shape of the new tensor by swapping the two specified dimensions
+    new_shape = shape[:]
+    new_shape[dims[0]], new_shape[dims[1]] = new_shape[dims[1]], new_shape[dims[0]]
+
+    # Create the output tensor with the new shape, initialized with None
+    def create_nested_list(shape):
+        if len(shape) == 1:
+            return [None] * shape[0]
+        else:
+            return [create_nested_list(shape[1:]) for _ in range(shape[0])]
+    out = create_nested_list(new_shape)
+
+    # We will iterate over all possible indices of the original tensor and 
+    # place them into the correct position in the new tensor.
+    # For every old coordinate, the new coordinate is just the old coordinate
+    # with dims[0] and dims[1] swapped.
+
+    # A helper function to recursively iterate over all indices
+    def recurse_indices(current_shape, current_idx=[]):
+        #print(current_shape, current_idx)
+        if len(current_shape) == 0:
+            yield current_idx
+        else:
+            for i in range(current_shape[0]):
+                yield from recurse_indices(current_shape[1:], current_idx + [i])
+
+    # Get an element from nested list by a list of indices
+    def nested_get(pointer, idxs):
+        for i in idxs:
+            pointer = pointer[i]
+        return pointer
+
+    # Set an element in nested list by a list of indices
+    def nested_set(pointer, idxs, value):
+        for i in idxs[:-1]:
+            pointer = pointer[i]
+        pointer[idxs[-1]] = value
+
+    # Fill the new tensor with transposed elements
+    for old_idx in recurse_indices(shape):
+        #print(old_idx)
+        # Compute the new index by swapping dims[0] and dims[1]
+        new_idx = list(old_idx)
+        new_idx[dims[0]], new_idx[dims[1]] = new_idx[dims[1]], new_idx[dims[0]]
+        #print(new_idx)
+        value = nested_get(x, old_idx)
+        nested_set(out, new_idx, value)
+
+    return out
 
 def tensor_entry_wise_add(x, y):
     '''
@@ -137,6 +214,10 @@ def tensor_entry_wise_add(x, y):
     return recursive_entry_wise_add(x, y)
 
 if __name__ == "__main__":
+    batch_size = 2
+    seq_len = 3
+    model_dim = 4
+
     ### test pretty tensor printer
     nested_list = [
         [
@@ -187,15 +268,23 @@ if __name__ == "__main__":
         for _ in range(seq_len)]
     pretty_print_tensor(x)
     print('\n')
-    y = transpose(x)
+    y = transpose_matrix(x)
     pretty_print_tensor(y)
-    # (n > 2)-dim
+    # more than 2 dims, but only last 2 dims are to be transposed
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
     pretty_print_tensor(x)
     print('\n')
-    y = transpose_tensor(x)
+    y = transpose_tensor_final_dims(x)
+    pretty_print_tensor(y)
+    # transpose any arbitrary combination of dimensions
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+      for _ in range(seq_len)]
+     for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = tensor_transpose_arbitrary(x, dims=(0, 2))
     pretty_print_tensor(y)
 
     ### test entry-wise addition
