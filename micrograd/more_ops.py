@@ -22,6 +22,38 @@ def pretty_print_tensor(tensor, indent=0):
             pretty_print_tensor(item, indent + 2)
         print(" " * indent + "]")
 
+def vector_wise_apply(function, x):
+    '''
+    applies the input function to the tensor vector-wise
+    
+    inputs: 
+        function - a function meant to be applied to a list of Value objects
+        x - list of lists of .... of Value objects
+    output: 
+        out - list of lists of .... of Value objects
+    '''
+    assert isinstance(x, list), "input must be at least a vector (aka a list of Value objects)"
+    if isinstance(x[0], list):
+        return [vector_wise_apply(function, sub_x) for sub_x in x]
+    else: # base case: the final vector dimension
+        return function(x)
+
+def matrix_wise_apply(function, x):
+    '''
+    applies the input function to the tensor matrix-wise
+    
+    inputs: 
+        function - a function meant to be applied to a list of lists of Value objects
+        x - list of lists of .... of Value objects
+    output: 
+        out - list of lists of .... of Value objects
+    '''
+    assert isinstance(x[0], list), "input must be at least a matrix (aka a list of lists of Value objects)"
+    if isinstance(x[0][0], list):
+        return [matrix_wise_apply(function, sub_x) for sub_x in x]
+    else: # base case: the final two dimensions which compose a matrix
+        return function(x)
+
 def transpose_matrix(x):
     '''
     input: x - list of lists of Value objects where first list is length m and second is length n
@@ -33,31 +65,6 @@ def transpose_matrix(x):
         for j in range(n):
             new_matrix[j][i] = x[i][j]
     return new_matrix
-
-def transpose_tensor_final_dims(x):
-    '''
-    input: x - list of lists of .... of Value objects
-    output: out - list of lists of .... of Value objects where the final two dimensions are transposed
-    '''
-    # Check if x has more than 1 dimension
-    item = x
-    dims = []
-    while isinstance(item, list):
-        dims.append(len(item))
-        item = item[0]
-    
-    if len(dims) < 2:
-        raise ValueError('x must have more than 1 dimension to be transposed')
-        
-    # Helper function to recursively apply transpose. this lets us move through a dynamic number of dimensions
-    def recursive_transpose(sub_tensor):
-        if isinstance(sub_tensor[0][0], list):
-            return [recursive_transpose(sub_part) for sub_part in sub_tensor]
-        else: # Base case: when the tensor has only two dimensions
-            return transpose_2dim(sub_tensor)
-
-    # Recursively apply the transpose operation to the final two dimensions
-    return recursive_transpose(x)
 
 def transpose(x, dims: tuple):
     """
@@ -167,6 +174,37 @@ def entry_wise_add(x, y):
     # Recursively apply the entry-wise addition operation to the final dimension
     return recursive_entry_wise_add(x, y)
 
+def entry_wise_mult(x, y):
+    '''
+    entry-wise multiplication function that does not support broadcasting, aka inputs must be same shapes
+    
+    inputs: 
+        x - list of lists of .... of Value objects
+        y - list of lists of .... of Value objects of the same shape as x
+    output: 
+        out - list of lists of .... of Value objects of the same shape as x and y
+    '''
+    # Check if x and y have same dimensions
+    itemx, itemy = x, y
+    dimsx, dimsy = [], []
+    while isinstance(itemx, list):
+        dimsx.append(len(itemx))
+        itemx = itemx[0]
+    while isinstance(itemy, list):
+        dimsy.append(len(itemy))
+        itemy = itemy[0]
+    assert dimsx == dimsy, f"tensors must have matching dimensions but instead have {dimsx} and {dimsy}"
+        
+    # helper function to recursively apply entry-wise add. this lets us move through a dynamic number of dimensions
+    def recursive_entry_wise_mult(sub_tensor_x, sub_tensor_y):
+        if isinstance(sub_tensor_x[0], list):
+            return [recursive_entry_wise_mult(sub_part_x, sub_part_y) for sub_part_x, sub_part_y in zip(sub_tensor_x, sub_tensor_y)]
+        else: # base case: the final vector dimension
+            return [xi * yi for xi, yi in zip(sub_tensor_x, sub_tensor_y)]
+
+    # Recursively apply the entry-wise addition operation to the final dimension
+    return recursive_entry_wise_mult(x, y)
+
 def tensor_matmul(x, y):
     """
     Perform a matrix multiplication over the last two dimensions of two tensors (lists of lists of ... of Value objects).
@@ -241,23 +279,13 @@ if __name__ == "__main__":
     head_dim = 4
 
     ### test pretty tensor printer
-    nested_list = [
-        [
-            [1, 2, 3],
-            [4, 5, 6]
-        ],
-        [
-            [7, 8],
-            [9, 10, 11],
-            [12]
-        ]
-    ]
+    print('-------------- test pretty tensor printer -------------')
+    nested_list = [[[1, 2, 3],[4, 5, 6]],[[7, 8, 9],[10, 11, 12]]]
     pretty_print_tensor(nested_list)
-    print('\n')
-    print('\n')
 
     ### test transpose
     # 2-dim
+    print('\n\n-------------- test transpose 2-dim -------------')
     x = [[Value(r.uniform(-1,1)) for _ in range(model_dim)]
         for _ in range(seq_len)]
     pretty_print_tensor(x)
@@ -265,14 +293,16 @@ if __name__ == "__main__":
     y = transpose_matrix(x)
     pretty_print_tensor(y)
     # more than 2 dims, but only last 2 dims are to be transposed
+    print('\n\n-------------- test transpose on tensor of more than 2 dims, but only last 2 dims are to be transposed -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
     pretty_print_tensor(x)
     print('\n')
-    y = transpose_tensor_final_dims(x)
+    y = matrix_wise_apply(transpose_matrix, x)
     pretty_print_tensor(y)
     # transpose any arbitrary combination of dimensions
+    print('\n\n-------------- test transpose of any arbitrary combination of dimensions -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
       for _ in range(seq_len)]
      for _ in range(batch_size)]
@@ -282,6 +312,7 @@ if __name__ == "__main__":
     pretty_print_tensor(y)
 
     ### test entry-wise addition
+    print('\n\n-------------- test entry-wise addition -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
@@ -290,16 +321,32 @@ if __name__ == "__main__":
               for _ in range(seq_len)]
              for _ in range(batch_size)]
     pretty_print_tensor(y)
+    print('\n')
     z = entry_wise_add(x, y)
     pretty_print_tensor(z)
 
+    ### test entry-wise multiplication
+    print('\n\n-------------- test entry-wise multiplication -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    y = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+              for _ in range(seq_len)]
+             for _ in range(batch_size)]
+    pretty_print_tensor(y)
+    print('\n')
+    z = entry_wise_mult(x, y)
+    pretty_print_tensor(z)
+
     ### test tensor matmul
+    print('\n\n-------------- test tensor matmul -------------')
     q = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
        for _ in range(seq_len)]
       for _ in range(num_heads)]
      for _ in range(batch_size)]
     pretty_print_tensor(q)
-    print('\n\n')
+    print('\n')
     k = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
            for _ in range(seq_len)]
           for _ in range(num_heads)]
@@ -310,9 +357,9 @@ if __name__ == "__main__":
          for _ in range(batch_size)]
     k_transpose = transpose(k, dims=(2,3))
     pretty_print_tensor(k_transpose)
-    print('\n\n')
+    print('\n')
     logits = tensor_matmul(q, k_transpose)
     pretty_print_tensor(logits)
-    print('\n\n')
+    print('\n')
     out = tensor_matmul(logits, v)
     pretty_print_tensor(out)

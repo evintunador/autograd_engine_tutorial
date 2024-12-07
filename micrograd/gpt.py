@@ -1,6 +1,7 @@
 import random as r
 from engine import Value
 from nn import Module, Neuron
+from more_ops import *
 
 class Embedding(Module):
     def __init__(self, num_classes: int, dim: int):
@@ -27,6 +28,7 @@ def layer_norm(x):
     '''
     Layer normalization module that only takes as input a single vector, 
     meaning you've gotta handle the tensor logic outside the call
+    we'll do that using vector_wise_apply
     '''
     assert isinstance(x, list), "x should be a list of Value objects"
     assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
@@ -57,29 +59,26 @@ if __name__ == "__main__":
     head_dim = 4
 
     ### test embedding
+    print('\n\n-------------- test embedding -------------')
     E = Embedding(vocab_len, model_dim)
     print(E)
     print('\n')
     x = E([1,2,3])
     pretty_print_tensor(x)
-    print('\n')
-    print('\n')
 
     ### test layernorm
     # single vector
+    print('\n\n-------------- test layernorm on a single vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
     y = layer_norm(x)
     print(y)
-    print('\n')
-    print('\n')
     # tensor
+    print('\n\n-------------- test layernorm on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
     pretty_print_tensor(x)
     print('\n')
-    y = [[layer_norm(xi) for xi in seq] for seq in x]
+    y = vector_wise_apply(layer_norm, x)
     pretty_print_tensor(y)
-    print('\n')
-    print('\n')
