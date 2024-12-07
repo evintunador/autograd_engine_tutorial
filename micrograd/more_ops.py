@@ -272,27 +272,23 @@ def tensor_matmul(x, y):
 
 if __name__ == "__main__":
     batch_size = 2
-    vocab_len = 5
-    model_dim = 8
-    seq_len = 3
+    vocab_len = 10
+    model_dim = 4
+    seq_len = 5
     num_heads = 2
-    head_dim = 4
-
-    ### test pretty tensor printer
+    head_dim = 2
+    
     print('-------------- test pretty tensor printer -------------')
     nested_list = [[[1, 2, 3],[4, 5, 6]],[[7, 8, 9],[10, 11, 12]]]
     pretty_print_tensor(nested_list)
 
-    ### test transpose
-    # 2-dim
-    print('\n\n-------------- test transpose 2-dim -------------')
+    print('\n\n-------------- test transpose on a single matrix -------------')
     x = [[Value(r.uniform(-1,1)) for _ in range(model_dim)]
         for _ in range(seq_len)]
     pretty_print_tensor(x)
     print('\n')
     y = transpose_matrix(x)
     pretty_print_tensor(y)
-    # more than 2 dims, but only last 2 dims are to be transposed
     print('\n\n-------------- test transpose on tensor of more than 2 dims, but only last 2 dims are to be transposed -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -301,7 +297,6 @@ if __name__ == "__main__":
     print('\n')
     y = matrix_wise_apply(transpose_matrix, x)
     pretty_print_tensor(y)
-    # transpose any arbitrary combination of dimensions
     print('\n\n-------------- test transpose of any arbitrary combination of dimensions -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
       for _ in range(seq_len)]
@@ -311,7 +306,6 @@ if __name__ == "__main__":
     y = transpose(x, dims=(0, 2))
     pretty_print_tensor(y)
 
-    ### test entry-wise addition
     print('\n\n-------------- test entry-wise addition -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -325,7 +319,6 @@ if __name__ == "__main__":
     z = entry_wise_add(x, y)
     pretty_print_tensor(z)
 
-    ### test entry-wise multiplication
     print('\n\n-------------- test entry-wise multiplication -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -339,7 +332,6 @@ if __name__ == "__main__":
     z = entry_wise_mult(x, y)
     pretty_print_tensor(z)
 
-    ### test tensor matmul
     print('\n\n-------------- test tensor matmul -------------')
     q = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
        for _ in range(seq_len)]

@@ -52,22 +52,27 @@ def layer_norm(x):
 
 if __name__ == "__main__":
     batch_size = 2
-    vocab_len = 5
-    model_dim = 8
-    seq_len = 3
+    vocab_len = 10
+    model_dim = 4
+    seq_len = 5
     num_heads = 2
-    head_dim = 4
+    head_dim = 2
 
-    ### test embedding
-    print('\n\n-------------- test embedding -------------')
+    print('\n\n-------------- test embedding on a single input sequence -------------')
     E = Embedding(vocab_len, model_dim)
     print(E)
     print('\n')
     x = E([1,2,3])
     pretty_print_tensor(x)
+    print('\n\n-------------- test embedding on a batch of input sequences -------------')
+    E = Embedding(vocab_len, model_dim)
+    print(E)
+    print('\n')
+    input_tokens = [[r.randint(0,vocab_len-1) for _ in range(seq_len)]
+                    for _ in range(batch_size)]
+    x = vector_wise_apply(E, input_tokens)
+    pretty_print_tensor(x)
 
-    ### test layernorm
-    # single vector
     print('\n\n-------------- test layernorm on a single vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
