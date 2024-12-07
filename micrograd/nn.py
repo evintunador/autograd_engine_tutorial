@@ -19,8 +19,8 @@ class Neuron(Module):
         # w * x + b
         wixi = [wi*xi for wi, xi in zip(self.w, x)]
         
-        sum = Value(0.0) # for some reason sum() gives me an error so i do the addition manually
-        for i in wixi: 
+        sum = Value(wixi[0].data, (wixi[0],)) # for some reason sum() gives me an error so i do the addition manually
+        for i in wixi[1:]: 
             sum = sum + i
         
         act = sum + self.b

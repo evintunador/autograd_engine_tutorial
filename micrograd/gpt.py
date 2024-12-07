@@ -8,7 +8,6 @@ class Embedding(Module):
                        for _ in range(num_classes)]
 
     def __call__(self, x):
-        # x should be list of integers
         assert isinstance(x, list), "x should be a list of integers"
         assert all(isinstance(idx, int) for idx in x), "All elements in x must be integers"
         # grab embedding assigned to each token
@@ -23,3 +22,53 @@ class Embedding(Module):
 
     def parameters(self):
         return [p for c in self.weight for p in c]
+
+def LayerNorm(x):
+    '''
+    Layer normalization module that only takes as input a single vector, 
+    meaning you've gotta handle the tensor logic outside the call
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+
+    n = len(x)
+    # mean
+    mean = Value(x[0].data / n, (x[0],)) # for some reason sum() gives me an error so i do the addition manually
+    for xi in x[1:]: 
+        mean = mean + (xi / n)
+    # sd
+    tot = (x[0] - mean)**2
+    for xi in x[1:]:
+        tot = tot + (xi - mean)**2
+    sd = (tot / n) ** (-0.5)
+    # normalization
+    out = [None] * n
+    for i in range(n):
+        out[i] = (x[i] - mean) / sd
+
+    return out
+
+if __name__ == "__main__":
+    ### test embedding
+    E = Embedding(vocab_len, model_dim)
+    print(E)
+    print('\n')
+    x = E([1,2,3])
+    print(x)
+
+    ### test layernorm
+    # single vector
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = LayerNorm(x)
+    print(y)
+    # tensor
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    print(x)
+    print('\n')
+    y = [[LayerNorm(xi) for xi in seq] for seq in x]
+    print(y)
+
+    
