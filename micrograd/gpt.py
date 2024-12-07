@@ -85,14 +85,6 @@ def transpose_tensor(x):
     input: x - list of lists of .... of Value objects
     output: out - list of lists of .... of Value objects where the final two dimensions are transposed
     '''
-    # Helper function to recursively apply transpose
-    def recursive_transpose(sub_tensor):
-        # Base case: when the tensor has only two dimensions
-        if isinstance(sub_tensor[0][0], list):
-            return [recursive_transpose(sub_part) for sub_part in sub_tensor]
-        else:
-            return transpose(sub_tensor)
-    
     # Check if x has more than 1 dimension
     item = x
     dims = []
@@ -102,9 +94,47 @@ def transpose_tensor(x):
     
     if len(dims) < 2:
         raise ValueError('x must have more than 1 dimension to be transposed')
+        
+    # Helper function to recursively apply transpose. this lets us move through a dynamic number of dimensions
+    def recursive_transpose(sub_tensor):
+        if isinstance(sub_tensor[0][0], list):
+            return [recursive_transpose(sub_part) for sub_part in sub_tensor]
+        else: # Base case: when the tensor has only two dimensions
+            return transpose(sub_tensor)
 
     # Recursively apply the transpose operation to the final two dimensions
     return recursive_transpose(x)
+
+def tensor_entry_wise_add(x, y):
+    '''
+    entry-wise addition function that does not support broadcasting, aka inputs must be same shapes
+    
+    inputs: 
+        x - list of lists of .... of Value objects
+        y - list of lists of .... of Value objects of the same shape as x
+    output: 
+        out - list of lists of .... of Value objects of the same shape as x and y
+    '''
+    # Check if x and y have same dimensions
+    itemx, itemy = x, y
+    dimsx, dimsy = [], []
+    while isinstance(itemx, list):
+        dimsx.append(len(itemx))
+        itemx = itemx[0]
+    while isinstance(itemy, list):
+        dimsy.append(len(itemy))
+        itemy = itemy[0]
+    assert dimsx == dimsy, f"tensors must have matching dimensions but instead have {dimsx} and {dimsy}"
+        
+    # helper function to recursively apply entry-wise add. this lets us move through a dynamic number of dimensions
+    def recursive_entry_wise_add(sub_tensor_x, sub_tensor_y):
+        if isinstance(sub_tensor_x[0], list):
+            return [recursive_entry_wise_add(sub_part_x, sub_part_y) for sub_part_x, sub_part_y in zip(sub_tensor_x, sub_tensor_y)]
+        else: # base case: the final vector dimension
+            return [xi + yi for xi, yi in zip(sub_tensor_x, sub_tensor_y)]
+
+    # Recursively apply the entry-wise addition operation to the final dimension
+    return recursive_entry_wise_add(x, y)
 
 if __name__ == "__main__":
     ### test pretty tensor printer
@@ -167,3 +197,15 @@ if __name__ == "__main__":
     print('\n')
     y = transpose_tensor(x)
     pretty_print_tensor(y)
+
+    ### test entry-wise addition
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    y = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+              for _ in range(seq_len)]
+             for _ in range(batch_size)]
+    pretty_print_tensor(y)
+    z = tensor_entry_wise_add(x, y)
+    pretty_print_tensor(z)
