@@ -2,6 +2,26 @@ import random as r
 from engine import Value
 from nn import Module, Neuron, Linear, MLP
 
+def pretty_print_tensor(tensor, indent=0):
+    """
+    Pretty print a nested list (tensor-like structure).
+    
+    Parameters:
+        tensor (list): The nested list to print.
+        indent (int): Current indentation level (used for recursive calls).
+    """
+    if not isinstance(tensor, list):
+        print(" " * indent + str(tensor))
+        return
+
+    if all(not isinstance(item, list) for item in tensor):
+        print(" " * indent + "[" + ", ".join(map(str, tensor)) + "]")
+    else:
+        print(" " * indent + "[")
+        for item in tensor:
+            pretty_print_tensor(item, indent + 2)
+        print(" " * indent + "]")
+
 class Embedding(Module):
     def __init__(self, num_classes: int, dim: int):
         self.weight = [[Value(r.uniform(-1,1)) for _ in range(dim)] 
@@ -23,7 +43,7 @@ class Embedding(Module):
     def parameters(self):
         return [p for c in self.weight for p in c]
 
-def LayerNorm(x):
+def layer_norm(x):
     '''
     Layer normalization module that only takes as input a single vector, 
     meaning you've gotta handle the tensor logic outside the call
@@ -48,27 +68,102 @@ def LayerNorm(x):
 
     return out
 
+def transpose(x):
+    '''
+    input: x - list of lists of Value objects where first list is length m and second is length n
+    output: new_matrix - list of lists of Value objects where first list is length n and second is length m
+    '''
+    m, n = len(x), len(x[0])
+    new_matrix = [[None] * m for _ in range(n)]
+    for i in range(m):
+        for j in range(n):
+            new_matrix[j][i] = x[i][j]
+    return new_matrix
+
+def transpose_tensor(x):
+    '''
+    input: x - list of lists of .... of Value objects
+    output: out - list of lists of .... of Value objects where the final two dimensions are transposed
+    '''
+    # Helper function to recursively apply transpose
+    def recursive_transpose(sub_tensor):
+        # Base case: when the tensor has only two dimensions
+        if isinstance(sub_tensor[0][0], list):
+            return [recursive_transpose(sub_part) for sub_part in sub_tensor]
+        else:
+            return transpose(sub_tensor)
+    
+    # Check if x has more than 1 dimension
+    item = x
+    dims = []
+    while isinstance(item, list):
+        dims.append(len(item))
+        item = item[0]
+    
+    if len(dims) < 2:
+        raise ValueError('x must have more than 1 dimension to be transposed')
+
+    # Recursively apply the transpose operation to the final two dimensions
+    return recursive_transpose(x)
+
 if __name__ == "__main__":
+    ### test pretty tensor printer
+    nested_list = [
+        [
+            [1, 2, 3],
+            [4, 5, 6]
+        ],
+        [
+            [7, 8],
+            [9, 10, 11],
+            [12]
+        ]
+    ]
+    pretty_print_tensor(nested_list)
+    print('\n')
+    print('\n')
+
     ### test embedding
     E = Embedding(vocab_len, model_dim)
     print(E)
     print('\n')
     x = E([1,2,3])
-    print(x)
+    pretty_print_tensor(x)
+    print('\n')
+    print('\n')
 
     ### test layernorm
     # single vector
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
-    y = LayerNorm(x)
+    y = layer_norm(x)
     print(y)
+    print('\n')
+    print('\n')
     # tensor
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
-    print(x)
+    pretty_print_tensor(x)
     print('\n')
-    y = [[LayerNorm(xi) for xi in seq] for seq in x]
-    print(y)
+    y = [[layer_norm(xi) for xi in seq] for seq in x]
+    pretty_print_tensor(y)
+    print('\n')
+    print('\n')
 
-    
+    ### test transpose
+    # 2-dim
+    x = [[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+        for _ in range(seq_len)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = transpose(x)
+    pretty_print_tensor(y)
+    # (n > 2)-dim
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = transpose_tensor(x)
+    pretty_print_tensor(y)
