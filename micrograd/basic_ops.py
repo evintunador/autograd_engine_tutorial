@@ -270,6 +270,14 @@ def tensor_matmul(x, y):
 
     return recurse_mm(x, y)
 
+def relu(x):
+    '''
+    applies Rectified Linear Unit to all elements in the vector
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    return [val.relu() for val in x]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -355,3 +363,18 @@ if __name__ == "__main__":
     print('\n')
     out = tensor_matmul(logits, v)
     pretty_print_tensor(out)
+
+    print('\n\n-------------- test relu on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = relu(x)
+    print(y)
+    # tensor
+    print('\n\n-------------- test relu on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(relu, x)
+    pretty_print_tensor(y)
