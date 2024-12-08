@@ -278,6 +278,14 @@ def relu(x):
     assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
     return [val.relu() for val in x]
 
+def exp(x):
+    '''
+    exponentiates  all elements in the vector
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    return [val.exp() for val in x]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -377,4 +385,19 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(relu, x)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test exp on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = exp(x)
+    print(y)
+    # tensor
+    print('\n\n-------------- test exp on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(exp, x)
     pretty_print_tensor(y)
