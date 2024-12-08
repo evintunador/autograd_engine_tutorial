@@ -1,6 +1,5 @@
 import random as r
 from engine import Value
-#from nn import Module, Neuron, Linear, MLP
 
 def pretty_print_tensor(tensor, indent=0):
     """
@@ -38,21 +37,21 @@ def vector_wise_apply(function, tensor, *args, **kwargs):
     else: # base case: the final vector dimension
         return function(tensor, *args, **kwargs)
 
-def matrix_wise_apply(function, x):
+def matrix_wise_apply(function, tensor, *args, **kwargs):
     '''
     applies the input function to the tensor matrix-wise
     
     inputs: 
         function - a function meant to be applied to a list of lists of Value objects
-        x - list of lists of .... of Value objects
-    output: 
-        out - list of lists of .... of Value objects
+        tensor - list of lists of .... of Value objects
+        *args & **kwargs - any extra arguments to be passed into function
+    output: list of lists of .... of Value objects
     '''
-    assert isinstance(x[0], list), "input must be at least a matrix (aka a list of lists of Value objects)"
-    if isinstance(x[0][0], list):
-        return [matrix_wise_apply(function, sub_x) for sub_x in x]
+    assert isinstance(tensor[0], list), "input must be at least a matrix (aka a list of lists of Value objects)"
+    if isinstance(tensor[0][0], list):
+        return [matrix_wise_apply(function, sub_tensor, *args, **kwargs) for sub_tensor in tensor]
     else: # base case: the final two dimensions which compose a matrix
-        return function(x)
+        return function(tensor, *args, **kwargs)
 
 def transpose_matrix(x):
     '''
