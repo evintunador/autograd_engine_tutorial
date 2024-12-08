@@ -22,21 +22,23 @@ def pretty_print_tensor(tensor, indent=0):
             pretty_print_tensor(item, indent + 2)
         print(" " * indent + "]")
 
-def vector_wise_apply(function, x):
+def vector_wise_apply(function, x, extra_arg = None):
     '''
     applies the input function to the tensor vector-wise
     
     inputs: 
         function - a function meant to be applied to a list of Value objects
         x - list of lists of .... of Value objects
+        extra_arg - a second value the function of interest may or may not require as an argument
+            *i should probably be using **args or **kwargs there somehow but idk how to use those tbh
     output: 
         out - list of lists of .... of Value objects
     '''
     assert isinstance(x, list), "input must be at least a vector (aka a list of Value objects)"
     if isinstance(x[0], list):
-        return [vector_wise_apply(function, sub_x) for sub_x in x]
+        return [vector_wise_apply(function, sub_x, extra_arg) for sub_x in x]
     else: # base case: the final vector dimension
-        return function(x)
+        return function(x, extra_arg) if extra_arg is not None else function(x)
 
 def matrix_wise_apply(function, x):
     '''
@@ -301,6 +303,26 @@ def softmax(x):
     # return a vector of each exponentiated entry divided by the sum
     return [xi / sum for xi in x_exp]
 
+def mult_vec_by_float(x, c):
+    '''
+    multiplies all elements in the vector x by the constant c
+    for division just input a fraction
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    assert isinstance(c, (int, float)), f"c should be an int or float, but instead is {type(c)}"
+    return [xi * c for xi in x]
+
+def add_float_to_vec(x, c):
+    '''
+    adds all elements in the vector x by the constant c
+    for subtraction just input a negative number
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    assert isinstance(c, (int, float)), f"c should be an int or float, but instead is {type(c)}"
+    return [xi + c for xi in x]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -430,4 +452,33 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(softmax, x)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test entry-wise add by a single float on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = add_float_to_vec(x, 100.)
+    print(y)
+    print('\n\n-------------- test entry-wise add by a single float on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(add_float_to_vec, x, 100.)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test entry-wise mult by a single float on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = mult_vec_by_float(x, 2.)
+    print(y)
+    # tensor
+    print('\n\n-------------- test entry-wise mult by a single float on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(mult_vec_by_float, x, 2.)
     pretty_print_tensor(y)
