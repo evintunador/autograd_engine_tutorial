@@ -1,7 +1,6 @@
 import random as r
-from engine import Value
-from basic_modules import Module, Embedding
-from basic_ops import *
+from modules import *
+from ops import *
 
 def layer_norm(x):
     '''

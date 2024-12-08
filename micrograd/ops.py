@@ -286,6 +286,21 @@ def exp(x):
     assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
     return [val.exp() for val in x]
 
+def softmax(x):
+    '''
+    performs the softmax operation across the input vector, giving us a list of probaiblities
+    '''
+    assert isinstance(x, list), "x should be a list of Value objects"
+    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    # perform entry-wise exponentiation
+    x_exp = exp(x)
+    # calculate the sum of the newly exponentiated vector
+    sum = x_exp[0]
+    for xi in x_exp[1:]:
+        sum = sum + xi
+    # return a vector of each exponentiated entry divided by the sum
+    return [xi / sum for xi in x_exp]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -400,4 +415,19 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(exp, x)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test exp on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = softmax(x)
+    print(y)
+    # tensor
+    print('\n\n-------------- test exp on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(softmax, x)
     pretty_print_tensor(y)
