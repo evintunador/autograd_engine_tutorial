@@ -335,6 +335,16 @@ def split_dim(vec, dims):
             mat[i][j] = vec[(i * dims[1]) + j]
     return mat
 
+def get_shape(tensor):
+    '''
+    finds the shape of a list of lists of... of lists of Value objects
+    '''
+    assert isinstance(tensor, list)
+    if isinstance(tensor[0], list):
+        return [len(tensor)] + get_shape(tensor[0])
+    else:
+        return [len(tensor)]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -426,7 +436,6 @@ if __name__ == "__main__":
     print(x)
     y = relu(x)
     print(y)
-    # tensor
     print('\n\n-------------- test relu on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -441,7 +450,6 @@ if __name__ == "__main__":
     print(x)
     y = exp(x)
     print(y)
-    # tensor
     print('\n\n-------------- test exp on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -455,8 +463,7 @@ if __name__ == "__main__":
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
     y = softmax(x)
-    print(y)
-    # tensor
+    print(y
     print('\n\n-------------- test softmax on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -485,7 +492,6 @@ if __name__ == "__main__":
     print(x)
     y = mult_vec_by_float(x, 2.)
     print(y)
-    # tensor
     print('\n\n-------------- test entry-wise mult by a single float on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -500,7 +506,6 @@ if __name__ == "__main__":
     print(x)
     y = split_dim(x, dims=(num_heads, head_dim))
     pretty_print_tensor(y)
-    # tensor
     print('\n\n-------------- test split_dim on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -509,3 +514,11 @@ if __name__ == "__main__":
     print('\n')
     y = vector_wise_apply(split_dim, tensor = x, dims=(num_heads, head_dim))
     pretty_print_tensor(y)
+
+    print('\n\n-------------- test get_shape -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    print(get_shape(x))
