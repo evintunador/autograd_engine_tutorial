@@ -320,6 +320,21 @@ def add_float_to_vec(vec, scalar):
     assert isinstance(scalar, (int, float)), f"scalar should be an int or float, but instead is {type(scalar)}"
     return [x + scalar for x in vec]
 
+def split_dim(vec, dims):
+    '''
+    splits input vector of shape (dims[0] + dims[1]) into matrix of shape (dims[0], dims[1])
+    '''
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    assert len(dims) == 2
+    assert len(vec) == dims[0] * dims[1], f'vector length {len(vec)} must match desired reshape ({dims[0]},{dims[1]})'
+
+    mat = [[None]*dims[1] for _ in range(dims[0])]
+    for i in range(dims[0]):
+        for j in range(dims[1]):
+            mat[i][j] = vec[(i * dims[1]) + j]
+    return mat
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -478,4 +493,19 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(mult_vec_by_float, tensor = x, scalar = 2.)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test split_dim on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = split_dim(x, dims=(num_heads, head_dim))
+    pretty_print_tensor(y)
+    # tensor
+    print('\n\n-------------- test split_dim on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(split_dim, tensor = x, dims=(num_heads, head_dim))
     pretty_print_tensor(y)
