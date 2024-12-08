@@ -29,6 +29,23 @@ def layer_norm(x):
 
     return out
 
+class MLP(Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        self.up = Linear(input_dim, hidden_dim)
+        self.down = Linear(hidden_dim, output_dim)
+
+    def __call__(self, x):
+        up = self.up(x)
+        act = [i.relu() for i in up]
+        down = self.down(act)
+        return down
+
+    def parameters(self):
+        return [p for p in self.up.parameters()] + [p for p in self.down.parameters()]
+
+    def __repr__(self):
+        return f"MLP of [{self.up}, {self.down}]"
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -50,4 +67,20 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(layer_norm, x)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test MLP on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    mlp = MLP(model_dim, 4 * model_dim, model_dim)
+    y = mlp(x)
+    print(y)
+    # tensor
+    print('\n\n-------------- test MLP on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(mlp, x)
     pretty_print_tensor(y)

@@ -30,6 +30,43 @@ class Embedding(Module):
     def parameters(self):
         return [p for c in self.weight for p in c]
 
+class Neuron(Module):
+    def __init__(self, input_dim):
+        self.w = [Value(r.uniform(-1,1)) for _ in range(input_dim)]
+        self.b = Value(0.0)
+
+    def __call__(self, x):
+        assert len(x) == len(self.w), f'mismatch between input dim {len(x)} and weight dim {len(self.w)}'
+        # w * x + b
+        wixi = [wi*xi for wi, xi in zip(self.w, x)]
+        
+        sum = Value(wixi[0].data, (wixi[0],)) # for some reason sum() gives me an error so i do the addition manually
+        for i in wixi[1:]: 
+            sum = sum + i
+        
+        act = sum + self.b
+        return act
+
+    def parameters(self):
+        return self.w + [self.b]
+
+    def __repr__(self):
+        return f"Neuron({len(self.w)})"
+
+class Linear(Module):
+    def __init__(self, input_dim, output_dim):
+        self.neurons = [Neuron(input_dim) for _ in range(output_dim)]
+
+    def __call__(self, x):
+        out = [n(x) for n in self.neurons]
+        return out[0] if len(out)==1 else out
+
+    def parameters(self):
+        return [p for n in self.neurons for p in n.parameters()]
+
+    def __repr__(self):
+        return f"Layer of [{', '.join(str(n) for n in self.neurons)}]"
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -53,4 +90,18 @@ if __name__ == "__main__":
     x = vector_wise_apply(E, input_tokens)
     pretty_print_tensor(x)
     
-    
+    print('\n\n-------------- test linear layer on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    w = Linear(model_dim, head_dim)
+    y = w(x)
+    print(y)
+    # tensor
+    print('\n\n-------------- test linear layer on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    y = vector_wise_apply(w, x)
+    pretty_print_tensor(y)
