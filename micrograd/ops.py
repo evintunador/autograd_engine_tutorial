@@ -322,9 +322,10 @@ def split_dim(vec, dims):
     return mat
 
 if __name__ == "__main__":
-    batch_size = 1
+    batch_size = 2
     vocab_len = 10
     model_dim = 8
+    max_seq_len = 5
     seq_len = 3
     num_heads = 2
     head_dim = model_dim // num_heads

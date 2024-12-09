@@ -1,5 +1,6 @@
 import random as r
 from engine import Value
+from ops import *
 
 class Module: # just to make our syntax the same as pytorch's
     def zero_grad(self):
@@ -67,13 +68,29 @@ class Linear(Module):
     def __repr__(self):
         return f"Layer of [{', '.join(str(n) for n in self.neurons)}]"
 
+class Mask(Module):
+    def __init__(self, max_seq_len):
+        self.max_seq_len = max_seq_len
+        self.mask = [ [1] * (i + 1) + [0] * (max_seq_len - i - 1) for i in range(max_seq_len)]
+
+    def __call__(self, seq_len):
+        assert 0 < seq_len <= self.max_seq_len, f'seq_len {seq_len} must be less than max_seq_len {max_seq_len}'
+        return [[i for i in row[:seq_len]] for row in self.mask[:seq_len]]
+
+    def __repr__(self):
+        weights_repr = "\n".join(
+            f"[{', '.join(str(p) for p in row)}]" for row in self.mask
+        )
+        return f"Causal self-attention mask:\n{weights_repr}"
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
-    model_dim = 4
-    seq_len = 5
+    model_dim = 8
+    max_seq_len = 5
+    seq_len = 3
     num_heads = 2
-    head_dim = 2
+    head_dim = model_dim // num_heads
 
     print('\n\n-------------- test embedding on a single input sequence -------------')
     E = Embedding(vocab_len, model_dim)
@@ -96,7 +113,6 @@ if __name__ == "__main__":
     w = Linear(model_dim, head_dim)
     y = w(x)
     print(y)
-    # tensor
     print('\n\n-------------- test linear layer on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -105,3 +121,9 @@ if __name__ == "__main__":
     print('\n')
     y = vector_wise_apply(w, x)
     pretty_print_tensor(y)
+
+    print('\n\n-------------- test causal self-attention mask -------------')
+    mask = Mask(max_seq_len)
+    print(mask)
+    pretty_print_tensor(mask(seq_len))
+    pretty_print_tensor(mask(seq_len - 1))
