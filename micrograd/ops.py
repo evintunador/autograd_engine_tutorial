@@ -90,13 +90,7 @@ def transpose(x, dims: tuple):
         return x
     
     # Get the shape of the tensor
-    shape = []
-    pointer = x[:]
-    while isinstance(pointer, list):
-        shape.append(len(pointer))
-        pointer = pointer[0] if len(pointer) > 0 else None
-        if pointer is None:
-            break
+    shape = get_shape(x)
     ndims = len(shape)
 
     assert ndims >= 0, "x must have at least 2 dimensions to transpose."
@@ -330,10 +324,10 @@ def split_dim(vec, dims):
 if __name__ == "__main__":
     batch_size = 1
     vocab_len = 10
-    model_dim = 4
+    model_dim = 8
     seq_len = 3
     num_heads = 2
-    head_dim = 4
+    head_dim = model_dim // num_heads
 
     print('\n\n-------------- test get_shape -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
@@ -368,7 +362,9 @@ if __name__ == "__main__":
      for _ in range(batch_size)]
     pretty_print_tensor(x)
     print('\n')
-    y = transpose(x, dims=(0, 2))
+    dims=(0, 2)
+    print(f'dims to be transposed: {dims}')
+    y = transpose(x, dims)
     pretty_print_tensor(y)
 
     print('\n\n-------------- test entry-wise addition for vectors -------------')
