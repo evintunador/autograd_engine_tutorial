@@ -28,7 +28,7 @@ def layer_norm(x):
 
     return out
 
-class MLP(Module):
+class MultiLayerPerceptron(Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         self.up = Linear(input_dim, hidden_dim)
         self.down = Linear(hidden_dim, output_dim)
@@ -125,6 +125,19 @@ class MultiHeadSelfAttention(Module):
         # mix output values of each head together
         return vector_wise_apply(self.Wo, output_values) # shape (batch_size, seq_len, model_dim)
 
+class ResidualLayer(Module):
+    def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult):
+        self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
+        self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
+
+    def __call__(self, x):
+        x_normed = vector_wise_apply(layer_norm, x)
+        x_mhsa = self.mhsa(x_normed)
+        x_2 = entry_wise_add(x, x_mhsa)
+        x_2_normed = vector_wise_apply(layer_norm, x_2)
+        x_mlp = vector_wise_apply(self.mlp, x_2_normed)
+        return entry_wise_add(x_2, x_mlp)
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -152,7 +165,7 @@ if __name__ == "__main__":
     print('\n\n-------------- test MLP on a vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
-    mlp = MLP(model_dim, 4 * model_dim, model_dim)
+    mlp = MultiLayerPerceptron(model_dim, 4 * model_dim, model_dim)
     y = mlp(x)
     print(y)
     # tensor
@@ -186,4 +199,13 @@ if __name__ == "__main__":
     print(get_shape(x))
     mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
     y = mhsa(x)
+    print(get_shape(y))
+
+    print('\n\n-------------- test residual layer -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    print(get_shape(x))
+    layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult)
+    y = layer(x)
     print(get_shape(y))
