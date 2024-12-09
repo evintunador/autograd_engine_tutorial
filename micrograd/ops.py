@@ -330,6 +330,17 @@ def dropout(vec, rate = 0.1):
     assert 0 <= rate < 1, f"dropout rate must be scalar value in [0,1) but instead is print({rate})"
     return [xi if r.uniform(0,1) > rate else Value(0.) for xi in vec]
 
+def sum(vec):
+    '''
+    sums up all values in a vector
+    returns a single Value object, so if it's being called by vector_wise_apply that means it removes the last dimension in the process
+    '''
+    assert isinstance(vec, list) and isinstance(vec[0], (float, int, Value))
+    tot = vec[0]
+    for x in vec[1:]:
+        tot = tot + x
+    return tot
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -558,3 +569,11 @@ if __name__ == "__main__":
     rate = 0.5
     y = vector_wise_apply(dropout, x, rate)
     pretty_print_tensor(y)
+
+    print('\n\n-------------- test sum on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)).exp() for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    print(get_shape(x))
+    y = vector_wise_apply(sum, x)
+    print(get_shape(y))
