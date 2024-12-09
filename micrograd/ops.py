@@ -310,6 +310,12 @@ def split_dim(vec, dims):
             mat[i][j] = vec[(i * dims[1]) + j]
     return mat
 
+def flatten(mat):
+    assert isinstance(mat[0], list) and isinstance(mat[0][0], Value),\
+        'mat should be a matrix (AKA list of list of Value objects)'
+    m, n = len(mat), len(mat[0])
+    return [mat[i][j] for i in range(m) for j in range(n)]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -505,4 +511,14 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(split_dim, tensor = x, dims=(num_heads, head_dim))
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test flatten on a tensor -------------')
+    x = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)]
+           for _ in range(num_heads)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    y = matrix_wise_apply(flatten, x)
+    print(get_shape(y))
     pretty_print_tensor(y)
