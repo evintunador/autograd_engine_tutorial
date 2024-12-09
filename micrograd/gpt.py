@@ -54,6 +54,12 @@ class Mask(Module):
         assert 0 < seq_len <= self.max_seq_len, f'seq_len {seq_len} must be less than max_seq_len {max_seq_len}'
         return [[i for i in row[:seq_len]] for row in self.mask[:seq_len]]
 
+    def masked_fill(self, matrix, val = float('-inf')):
+        mat_shape  = get_shape(matrix)
+        assert mat_shape[0] == mat_shape[1], f"masked_fill requires input to be square matrix but instead got shape {mat_shape}"
+        mask = self(len(matrix))
+        return [[matrix[i][j] if mask[i][j] else Value(val) for j in range(mat_shape[1])] for i in range(mat_shape[0])]
+
     def __repr__(self):
         weights_repr = "\n".join(
             f"[{', '.join(str(p) for p in row)}]" for row in self.mask
@@ -104,3 +110,11 @@ if __name__ == "__main__":
     print(mask)
     pretty_print_tensor(mask(seq_len))
     pretty_print_tensor(mask(seq_len - 1))
+    x = [[[[r.uniform(-1,1) for _ in range(seq_len)]
+           for _ in range(seq_len)]
+          for _ in range(num_heads)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    mask = Mask(max_seq_len)
+    y = matrix_wise_apply(mask.masked_fill, x)
+    pretty_print_tensor(y)
