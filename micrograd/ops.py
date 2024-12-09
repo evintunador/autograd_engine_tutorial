@@ -1,6 +1,16 @@
 import random as r
 from engine import Value
 
+def get_shape(tensor):
+    '''
+    finds the shape of a list of lists of... of lists of Value objects
+    '''
+    assert isinstance(tensor, list)
+    if isinstance(tensor[0], list):
+        return [len(tensor)] + get_shape(tensor[0])
+    else:
+        return [len(tensor)]
+        
 def pretty_print_tensor(tensor, indent=0):
     """
     Pretty print a nested list (tensor-like structure).
@@ -152,16 +162,7 @@ def entry_wise_add(x, y):
     output: 
         out - list of lists of .... of Value objects of the same shape as x and y
     '''
-    # Check if x and y have same dimensions
-    itemx, itemy = x, y
-    dimsx, dimsy = [], []
-    while isinstance(itemx, list):
-        dimsx.append(len(itemx))
-        itemx = itemx[0]
-    while isinstance(itemy, list):
-        dimsy.append(len(itemy))
-        itemy = itemy[0]
-    assert dimsx == dimsy, f"tensors must have matching dimensions but instead have {dimsx} and {dimsy}"
+    assert get_shape(x) == get_shape(y), f"tensors must have matching dimensions but instead have {get_shape(x)} and {get_shape(y)}"
         
     # helper function to recursively apply entry-wise add. this lets us move through a dynamic number of dimensions
     def recursive_entry_wise_add(sub_tensor_x, sub_tensor_y):
@@ -183,16 +184,7 @@ def entry_wise_mult(x, y):
     output: 
         out - list of lists of .... of Value objects of the same shape as x and y
     '''
-    # Check if x and y have same dimensions
-    itemx, itemy = x, y
-    dimsx, dimsy = [], []
-    while isinstance(itemx, list):
-        dimsx.append(len(itemx))
-        itemx = itemx[0]
-    while isinstance(itemy, list):
-        dimsy.append(len(itemy))
-        itemy = itemy[0]
-    assert dimsx == dimsy, f"tensors must have matching dimensions but instead have {dimsx} and {dimsy}"
+    assert get_shape(x) == get_shape(y), f"tensors must have matching dimensions but instead have {get_shape(x)} and {get_shape(y)}"
         
     # helper function to recursively apply entry-wise add. this lets us move through a dynamic number of dimensions
     def recursive_entry_wise_mult(sub_tensor_x, sub_tensor_y):
@@ -335,23 +327,21 @@ def split_dim(vec, dims):
             mat[i][j] = vec[(i * dims[1]) + j]
     return mat
 
-def get_shape(tensor):
-    '''
-    finds the shape of a list of lists of... of lists of Value objects
-    '''
-    assert isinstance(tensor, list)
-    if isinstance(tensor[0], list):
-        return [len(tensor)] + get_shape(tensor[0])
-    else:
-        return [len(tensor)]
-
 if __name__ == "__main__":
-    batch_size = 2
+    batch_size = 1
     vocab_len = 10
     model_dim = 4
-    seq_len = 5
+    seq_len = 3
     num_heads = 2
-    head_dim = 2
+    head_dim = 4
+
+    print('\n\n-------------- test get_shape -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    print('\n')
+    print(get_shape(x))
     
     print('-------------- test pretty tensor printer -------------')
     nested_list = [[[1, 2, 3],[4, 5, 6]],[[7, 8, 9],[10, 11, 12]]]
@@ -381,7 +371,15 @@ if __name__ == "__main__":
     y = transpose(x, dims=(0, 2))
     pretty_print_tensor(y)
 
-    print('\n\n-------------- test entry-wise addition -------------')
+    print('\n\n-------------- test entry-wise addition for vectors -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(y)
+    print('\n')
+    z = entry_wise_add(x, y)
+    pretty_print_tensor(z)
+    print('\n\n-------------- test entry-wise addition for tensors -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
@@ -393,8 +391,16 @@ if __name__ == "__main__":
     print('\n')
     z = entry_wise_add(x, y)
     pretty_print_tensor(z)
-
-    print('\n\n-------------- test entry-wise multiplication -------------')
+    
+    print('\n\n-------------- test entry-wise multiplication for vectors -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(y)
+    print('\n')
+    z = entry_wise_mult(x, y)
+    pretty_print_tensor(z)
+    print('\n\n-------------- test entry-wise multiplication for tensors -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
@@ -463,7 +469,7 @@ if __name__ == "__main__":
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
     y = softmax(x)
-    print(y
+    print(y)
     print('\n\n-------------- test softmax on a tensor -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
           for _ in range(seq_len)]
@@ -514,11 +520,3 @@ if __name__ == "__main__":
     print('\n')
     y = vector_wise_apply(split_dim, tensor = x, dims=(num_heads, head_dim))
     pretty_print_tensor(y)
-
-    print('\n\n-------------- test get_shape -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
-    pretty_print_tensor(x)
-    print('\n')
-    print(get_shape(x))
