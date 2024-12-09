@@ -1,5 +1,4 @@
 import math
-import numpy as np
 
 class Value:
     """stores a single scalar value and its gradient"""
@@ -68,6 +67,15 @@ class Value:
 
         def _backward():
             self.grad += out.data * out.grad # local derivative of e^x is just e^x, aka out.data
+        out._backward = _backward
+
+        return out
+
+    def log(self):
+        out = Value(math.log(self.data), (self,))
+
+        def _backward():
+            self.grad += (1 / self.data) * out.grad
         out._backward = _backward
 
         return out

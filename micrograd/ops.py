@@ -244,36 +244,44 @@ def tensor_matmul(x, y):
 
     return recurse_mm(x, y)
 
-def relu(x):
+def relu(vec):
     '''
     applies Rectified Linear Unit to all elements in the vector
     '''
-    assert isinstance(x, list), "x should be a list of Value objects"
-    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
-    return [val.relu() for val in x]
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    return [x.relu() for x in vec]
 
-def exp(x):
+def exp(vec):
     '''
     exponentiates  all elements in the vector
     '''
-    assert isinstance(x, list), "x should be a list of Value objects"
-    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
-    return [val.exp() for val in x]
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    return [x.exp() for x in vec]
 
-def softmax(x):
+def log(vec):
+    '''
+    takes the natural log of all elements in the vector
+    '''
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    return [x.log() for x in vec]
+
+def softmax(vec):
     '''
     performs the softmax operation across the input vector, giving us a list of probaiblities
     '''
-    assert isinstance(x, list), "x should be a list of Value objects"
-    assert all(isinstance(idx, Value) for idx in x), "All elements in x must be Value objects"
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
     # perform entry-wise exponentiation
-    x_exp = exp(x)
+    vec_exp = exp(vec)
     # calculate the sum of the newly exponentiated vector
-    sum = x_exp[0]
-    for xi in x_exp[1:]:
-        sum = sum + xi
+    sum = vec_exp[0]
+    for x in vec_exp[1:]:
+        sum = sum + x
     # return a vector of each exponentiated entry divided by the sum
-    return [xi / sum for xi in x_exp]
+    return [x / sum for x in vec_exp]
 
 def mult_vec_by_float(vec, scalar):
     '''
@@ -475,6 +483,19 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     print('\n')
     y = vector_wise_apply(softmax, x)
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test log on a vector -------------')
+    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    print(x)
+    y = log(softmax(x))
+    print(y)
+    print('\n\n-------------- test log on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    y = vector_wise_apply(log, vector_wise_apply(softmax, x))
     pretty_print_tensor(y)
 
     print('\n\n-------------- test entry-wise add by a single float on a vector -------------')
