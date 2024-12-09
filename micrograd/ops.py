@@ -201,18 +201,7 @@ def tensor_matmul(x, y):
     The leading dimensions (everything except the last two) must match.
     The result will have shape: [..., M, P].
     """
-
-    # Get the shape of a nested list
-    def get_shape(tensor):
-        shape = []
-        pointer = tensor
-        while isinstance(pointer, list) and len(pointer) > 0:
-            shape.append(len(pointer))
-            pointer = pointer[0]
-        return shape
-
-    x_shape = get_shape(x)
-    y_shape = get_shape(y)
+    x_shape, y_shape = get_shape(x), get_shape(y)
 
     assert len(x_shape) >= 2 and len(y_shape) >= 2, "tensors must have at least 2D for matrix multiplication."
     assert x_shape[-1] == y_shape[-2], f"Inner dimensions must match: got {x_shape[-1]} and {y_shape[-2]}."
