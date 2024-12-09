@@ -39,10 +39,11 @@ class Neuron(Module):
     def __call__(self, x):
         assert len(x) == len(self.w), f'mismatch between input dim {len(x)} and weight dim {len(self.w)}'
         # w * x + b
-        
-        # dot product
         wixi = [wi*xi for wi, xi in zip(self.w, x)]
-        sum_wixi = sum(wixi)
+        
+        sum = wixi[0] # for some reason sum() gives me an error so i do the addition manually
+        for i in wixi[1:]: 
+            sum = sum + i
         
         act = sum + self.b
         return act
