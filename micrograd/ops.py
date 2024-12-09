@@ -316,6 +316,12 @@ def flatten(mat):
     m, n = len(mat), len(mat[0])
     return [mat[i][j] for i in range(m) for j in range(n)]
 
+def dropout(vec, rate = 0.1):
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    assert 0 <= rate < 1, f"dropout rate must be scalar value in [0,1) but instead is print({rate})"
+    return [xi if r.uniform(0,1) > rate else Value(0.) for xi in vec]
+
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -521,4 +527,13 @@ if __name__ == "__main__":
     pretty_print_tensor(x)
     y = matrix_wise_apply(flatten, x)
     print(get_shape(y))
+    pretty_print_tensor(y)
+
+    print('\n\n-------------- test dropout on a tensor -------------')
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
+          for _ in range(seq_len)]
+         for _ in range(batch_size)]
+    pretty_print_tensor(x)
+    rate = 0.5
+    y = vector_wise_apply(dropout, x, rate)
     pretty_print_tensor(y)
