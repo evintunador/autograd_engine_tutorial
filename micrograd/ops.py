@@ -574,6 +574,6 @@ if __name__ == "__main__":
     x = [[[Value(r.uniform(-1,1)).exp() for _ in range(model_dim)]
           for _ in range(seq_len)]
          for _ in range(batch_size)]
-    print(get_shape(x))
+    pretty_print_tensor(x)
     y = vector_wise_apply(sum, x)
-    print(get_shape(y))
+    pretty_print_tensor(y)
