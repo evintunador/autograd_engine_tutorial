@@ -69,10 +69,11 @@ class Mask(Module):
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
-    model_dim = 4
-    seq_len = 5
+    model_dim = 8
+    max_seq_len = 5
+    seq_len = 3
     num_heads = 2
-    head_dim = 2
+    head_dim = model_dim // num_heads
 
     print('\n\n-------------- test layernorm on a single vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
@@ -110,7 +111,7 @@ if __name__ == "__main__":
     print(mask)
     pretty_print_tensor(mask(seq_len))
     pretty_print_tensor(mask(seq_len - 1))
-    x = [[[[r.uniform(-1,1) for _ in range(seq_len)]
+    x = [[[[Value(r.uniform(-1,1)) for _ in range(seq_len)]
            for _ in range(seq_len)]
           for _ in range(num_heads)]
          for _ in range(batch_size)]
