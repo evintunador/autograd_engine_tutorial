@@ -68,21 +68,6 @@ class Linear(Module):
     def __repr__(self):
         return f"Layer of [{', '.join(str(n) for n in self.neurons)}]"
 
-class Mask(Module):
-    def __init__(self, max_seq_len):
-        self.max_seq_len = max_seq_len
-        self.mask = [ [1] * (i + 1) + [0] * (max_seq_len - i - 1) for i in range(max_seq_len)]
-
-    def __call__(self, seq_len):
-        assert 0 < seq_len <= self.max_seq_len, f'seq_len {seq_len} must be less than max_seq_len {max_seq_len}'
-        return [[i for i in row[:seq_len]] for row in self.mask[:seq_len]]
-
-    def __repr__(self):
-        weights_repr = "\n".join(
-            f"[{', '.join(str(p) for p in row)}]" for row in self.mask
-        )
-        return f"Causal self-attention mask:\n{weights_repr}"
-
 if __name__ == "__main__":
     batch_size = 2
     vocab_len = 10
@@ -121,9 +106,3 @@ if __name__ == "__main__":
     print('\n')
     y = vector_wise_apply(w, x)
     pretty_print_tensor(y)
-
-    print('\n\n-------------- test causal self-attention mask -------------')
-    mask = Mask(max_seq_len)
-    print(mask)
-    pretty_print_tensor(mask(seq_len))
-    pretty_print_tensor(mask(seq_len - 1))
