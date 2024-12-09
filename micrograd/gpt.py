@@ -35,7 +35,7 @@ class MultiLayerPerceptron(Module):
 
     def __call__(self, x):
         up = self.up(x)
-        act = [i.relu() for i in up]
+        act = relu(up)
         down = self.down(act)
         return down
 
@@ -110,7 +110,7 @@ class MultiHeadSelfAttention(Module):
         # compute attention logits
         logits = tensor_matmul(q, k_t) # shape (batch_size, num_heads, seq_len, seq_len)
         # scale logits
-        scaled_logits = vector_wise_apply(mult_vec_by_float, logits, self.scale)
+        scaled_logits = vector_wise_apply(mult_vec_by_scalar, logits, self.scale)
         # apply mask
         masked_logits = matrix_wise_apply(self.mask.masked_fill, scaled_logits)
         # turn the logits into probability scores
@@ -146,21 +146,13 @@ if __name__ == "__main__":
     seq_len = 3
     num_heads = 2
     head_dim = model_dim // num_heads
+    mlp_mult = 4
 
     print('\n\n-------------- test layernorm on a single vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
     y = layer_norm(x)
     print(y)
-    # tensor
-    print('\n\n-------------- test layernorm on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
-    pretty_print_tensor(x)
-    print('\n')
-    y = vector_wise_apply(layer_norm, x)
-    pretty_print_tensor(y)
 
     print('\n\n-------------- test MLP on a vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
@@ -168,43 +160,27 @@ if __name__ == "__main__":
     mlp = MultiLayerPerceptron(model_dim, 4 * model_dim, model_dim)
     y = mlp(x)
     print(y)
-    # tensor
-    print('\n\n-------------- test MLP on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
-    pretty_print_tensor(x)
-    print('\n')
-    y = vector_wise_apply(mlp, x)
-    pretty_print_tensor(y)
 
     print('\n\n-------------- test causal self-attention mask -------------')
     mask = Mask(max_seq_len)
     print(mask)
-    pretty_print_tensor(mask(seq_len))
-    pretty_print_tensor(mask(seq_len - 1))
-    x = [[[[Value(r.uniform(-1,1)) for _ in range(seq_len)]
-           for _ in range(seq_len)]
-          for _ in range(num_heads)]
-         for _ in range(batch_size)]
-    pretty_print_tensor(x)
+    pretty_tensor_print(mask(seq_len))
+    pretty_tensor_print(mask(seq_len - 1))
+    x = [[[[Value(r.uniform(-1,1)) for _ in range(seq_len)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
+    pretty_tensor_print(x)
     mask = Mask(max_seq_len)
     y = matrix_wise_apply(mask.masked_fill, x)
-    pretty_print_tensor(y)
+    pretty_tensor_print(y)
 
     print('\n\n-------------- test causal multi-head self-attention mechanism -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
     y = mhsa(x)
     print(get_shape(y))
 
     print('\n\n-------------- test residual layer -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult)
     y = layer(x)

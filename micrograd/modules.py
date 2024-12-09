@@ -39,11 +39,10 @@ class Neuron(Module):
     def __call__(self, x):
         assert len(x) == len(self.w), f'mismatch between input dim {len(x)} and weight dim {len(self.w)}'
         # w * x + b
-        wixi = [wi*xi for wi, xi in zip(self.w, x)]
         
-        sum = wixi[0] # for some reason sum() gives me an error so i do the addition manually
-        for i in wixi[1:]: 
-            sum = sum + i
+        # dot product
+        wixi = [wi*xi for wi, xi in zip(self.w, x)]
+        sum_wixi = sum(wixi)
         
         act = sum + self.b
         return act
@@ -114,15 +113,14 @@ if __name__ == "__main__":
     print(E)
     print('\n')
     x = E([1,2,3])
-    pretty_print_tensor(x)
+    pretty_tensor_print(x)
     print('\n\n-------------- test embedding on a batch of input sequences -------------')
     E = Embedding(vocab_len, model_dim)
     print(E)
     print('\n')
-    input_tokens = [[r.randint(0,vocab_len-1) for _ in range(seq_len)]
-                    for _ in range(batch_size)]
+    input_tokens = [[r.randint(0,vocab_len-1) for _ in range(seq_len)] for _ in range(batch_size)]
     x = vector_wise_apply(E, input_tokens)
-    pretty_print_tensor(x)
+    pretty_tensor_print(x)
     
     print('\n\n-------------- test linear layer on a vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
@@ -131,23 +129,18 @@ if __name__ == "__main__":
     y = w(x)
     print(y)
     print('\n\n-------------- test linear layer on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
-    pretty_print_tensor(x)
+    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    pretty_tensor_print(x)
     print('\n')
     y = vector_wise_apply(w, x)
-    pretty_print_tensor(y)
+    pretty_tensor_print(y)
 
     print('\n\n-------------- test cross-entropoy loss -------------')
-    logits = [[[Value(r.uniform(-1,1)).exp() for _ in range(vocab_len)]
-          for _ in range(seq_len)]
-         for _ in range(batch_size)]
+    logits = [[[Value(r.uniform(-1,1)).exp() for _ in range(vocab_len)] for _ in range(seq_len)] for _ in range(batch_size)]
     logits = vector_wise_apply(softmax, logits)
-    pretty_print_tensor(logits)
+    pretty_tensor_print(logits)
     celoss = CrossEntropyLoss(vocab_len, pad_token = vocab_len - 1)
-    targets = [[r.randint(0, vocab_len - 1) for _ in range(seq_len)]
-               for _ in range(batch_size)]
-    pretty_print_tensor(targets)
+    targets = [[r.randint(0, vocab_len - 1) for _ in range(seq_len)] for _ in range(batch_size)]
+    pretty_tensor_print(targets)
     loss = celoss(logits, targets)
     print(loss)
