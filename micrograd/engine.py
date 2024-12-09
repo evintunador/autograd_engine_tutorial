@@ -75,7 +75,7 @@ class Value:
         out = Value(math.log(self.data), (self,))
 
         def _backward():
-            self.grad += (1 / self.data) * out.grad
+            self.grad += (1 / self.data) * out.grad # local derivative of ln(x) is 1/x
         out._backward = _backward
 
         return out
