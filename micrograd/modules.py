@@ -41,11 +41,11 @@ class Neuron(Module):
         # w * x + b
         wixi = [wi*xi for wi, xi in zip(self.w, x)]
         
-        sum = wixi[0] # for some reason sum() gives me an error so i do the addition manually
+        tot = wixi[0] # for some reason sum() gives me an error so i do the addition manually
         for i in wixi[1:]: 
-            sum = sum + i
+            tot = tot + i
         
-        act = sum + self.b
+        act = tot + self.b
         return act
 
     def parameters(self):

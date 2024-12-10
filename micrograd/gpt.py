@@ -28,23 +28,6 @@ def layer_norm(x):
 
     return out
 
-class MultiLayerPerceptron(Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        self.up = Linear(input_dim, hidden_dim)
-        self.down = Linear(hidden_dim, output_dim)
-
-    def __call__(self, x):
-        up = self.up(x)
-        act = relu(up)
-        down = self.down(act)
-        return down
-
-    def parameters(self):
-        return [p for p in self.up.parameters()] + [p for p in self.down.parameters()]
-
-    def __repr__(self):
-        return f"MLP of [{self.up}, {self.down}]"
-
 class Mask(Module):
     def __init__(self, max_seq_len):
         self.max_seq_len = max_seq_len
@@ -83,7 +66,7 @@ class MultiHeadSelfAttention(Module):
         
         self.Wo = Linear(num_heads * head_dim, model_dim)
     
-    def __call__(self, x):
+    def __call__(self, x, dropout_rate):
         assert isinstance(x, list) and isinstance(x[0], list) and isinstance(x[0][0], list) and isinstance(x[0][0][0], Value),\
             "input to MHSA mechanism must be tensor of ndim==3 for (batch_size, seq_len, model_dim)"
         batch_size, seq_len, model_dim = tuple(get_shape(x))
@@ -115,6 +98,8 @@ class MultiHeadSelfAttention(Module):
         masked_logits = matrix_wise_apply(self.mask.masked_fill, scaled_logits)
         # turn the logits into probability scores
         scores = vector_wise_apply(softmax, masked_logits)
+        # dropout; if we're training then dropout_rate>0 but if doing inference it'll be set ==0 in the model class
+        scores = vector_wise_apply(dropout, scores, dropout_rate)
 
         # use scores to select from values
         output_values = tensor_matmul(scores, v) # shape (batch_size, num_heads, seq_len, head_dim)
@@ -123,19 +108,38 @@ class MultiHeadSelfAttention(Module):
         output_values = matrix_wise_apply(flatten, output_values) # shape (batch_size, seq_len, num_heads * head_dim)
 
         # mix output values of each head together
-        return vector_wise_apply(self.Wo, output_values) # shape (batch_size, seq_len, model_dim)
+        out = vector_wise_apply(self.Wo, output_values) # shape (batch_size, seq_len, model_dim)
+        # before returning, dropout IF we're training
+        return vector_wise_apply(dropout, out, dropout_rate)
+
+class MultiLayerPerceptron(Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        self.up = Linear(input_dim, hidden_dim)
+        self.down = Linear(hidden_dim, output_dim)
+
+    def __call__(self, x, dropout_rate):
+        up = self.up(x)
+        act = relu(up)
+        down = self.down(act)
+        return vector_wise_apply(dropout, down, dropout_rate)
+
+    def parameters(self):
+        return [p for p in self.up.parameters()] + [p for p in self.down.parameters()]
+
+    def __repr__(self):
+        return f"MLP of [{self.up}, {self.down}]"
 
 class ResidualLayer(Module):
     def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult):
         self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
         self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
 
-    def __call__(self, x):
+    def __call__(self, x, dropout_rate):
         x_normed = vector_wise_apply(layer_norm, x)
-        x_mhsa = self.mhsa(x_normed)
+        x_mhsa = self.mhsa(x_normed, dropout_rate)
         x_2 = entry_wise_add(x, x_mhsa)
         x_2_normed = vector_wise_apply(layer_norm, x_2)
-        x_mlp = vector_wise_apply(self.mlp, x_2_normed)
+        x_mlp = vector_wise_apply(self.mlp, x_2_normed, dropout_rate)
         return entry_wise_add(x_2, x_mlp)
 
 if __name__ == "__main__":
@@ -147,6 +151,7 @@ if __name__ == "__main__":
     num_heads = 2
     head_dim = model_dim // num_heads
     mlp_mult = 4
+    dropout_rate = 0.1
 
     print('\n\n-------------- test layernorm on a single vector -------------')
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
@@ -158,7 +163,7 @@ if __name__ == "__main__":
     x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
     print(x)
     mlp = MultiLayerPerceptron(model_dim, 4 * model_dim, model_dim)
-    y = mlp(x)
+    y = mlp(x, dropout_rate)
     print(y)
 
     print('\n\n-------------- test causal self-attention mask -------------')
@@ -176,12 +181,12 @@ if __name__ == "__main__":
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
-    y = mhsa(x)
+    y = mhsa(x, dropout_rate)
     print(get_shape(y))
 
     print('\n\n-------------- test residual layer -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult)
-    y = layer(x)
+    y = layer(x, dropout_rate)
     print(get_shape(y))
