@@ -2,6 +2,19 @@ import random as r
 from modules import *
 from ops import *
 
+class Config:
+    def __init__(self):
+        self.batch_size = 2
+        self.vocab_len = 10
+        self.model_dim = 8
+        self.max_seq_len = 5
+        self.seq_len = 3
+        self.num_heads = 2
+        self.head_dim = self.model_dim // self.num_heads
+        self.mlp_mult = 4
+        self.dropout_rate = 0.1
+        self.num_layers = 2
+
 def layer_norm(x):
     '''
     Layer normalization module that only takes as input a single vector, 
@@ -50,7 +63,7 @@ class Mask(Module):
         return f"Causal self-attention mask:\n{weights_repr}"
 
 class MultiHeadSelfAttention(Module):
-    def __init__(self, model_dim, num_heads, head_dim, max_seq_len):
+    def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mask):
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -62,7 +75,7 @@ class MultiHeadSelfAttention(Module):
         
         self.scale = head_dim ** -0.5
 
-        self.mask = Mask(max_seq_len)
+        self.mask = mask
         
         self.Wo = Linear(num_heads * head_dim, model_dim)
     
@@ -130,8 +143,8 @@ class MultiLayerPerceptron(Module):
         return f"MLP of [{self.up}, {self.down}]"
 
 class ResidualLayer(Module):
-    def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult):
-        self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
+    def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult, mask):
+        self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len, mask)
         self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
 
     def __call__(self, x, dropout_rate):
@@ -141,6 +154,62 @@ class ResidualLayer(Module):
         x_2_normed = vector_wise_apply(layer_norm, x_2)
         x_mlp = vector_wise_apply(self.mlp, x_2_normed, dropout_rate)
         return entry_wise_add(x_2, x_mlp)
+
+class GPT(Module):
+    def __init__(self, config):
+        self.vocab_len = config.vocab_len
+        self.model_dim = config.model_dim
+        self.max_seq_len = config.max_seq_len
+        self.seq_len = config.seq_len
+        self.num_heads = config.num_heads
+        self.head_dim = config.head_dim
+        self.mlp_mult = config.mlp_mult
+        self.dropout_rate = config.dropout_rate
+        self.num_layers = config.num_layers
+
+        self.tok_embeddings = Embedding(self.vocab_len, self.model_dim)
+        self.scale = self.model_dim ** -0.5
+        self.pos_embeddings = Embedding(self.max_seq_len, self.model_dim)
+
+        self.mask = Mask(self.max_seq_len)
+        
+        self.layers = [ResidualLayer(self.model_dim, self.num_heads, self.head_dim, self.max_seq_len, self.mlp_mult, self.mask) 
+                       for _ in range(config.num_layers)]
+
+        self.output_proj = Linear(self.model_dim, self.vocab_len)
+
+        self.criterion = CrossEntropyLoss(self.vocab_len, pad_token = self.vocab_len - 1)
+
+    def __call__(self, input_token_ids, target_token_ids = None):
+        input_shape = get_shape(input_token_ids)
+        if len(input_shape) == 1: # if only one sequence is passed in, aka batch_size==1
+            input_shape = [1] + input_shape
+            input_tokens = [input_token_ids]
+
+        if target_token_ids: # if training
+            assert input_shape == get_shape(target_token_ids)
+            target_shape = get_shape(target_token_ids)
+            assert input_shape[1] == self.max_seq_len
+            dropout_rate = self.dropout_rate
+        else: # if inference
+            target_shape = None
+            assert input_shape[1] <= self.max_seq_len
+            dropout_rate = 0.
+
+        x = vector_wise_apply(self.tok_embeddings, input_token_ids)
+        pos = vector_wise_apply(self.pos_embeddings, [list(range(input_shape[1])) for _ in range(input_shape[0])])
+        x = entry_wise_add(x, pos)
+        x = vector_wise_apply(mult_vec_by_scalar, x, self.scale)
+
+        for layer in self.layers:
+            x = layer(x, dropout_rate)
+
+        logits = vector_wise_apply(self.output_proj, vector_wise_apply(layer_norm, x))
+        probabilities = vector_wise_apply(softmax, logits)
+
+        loss = self.criterion(probabilities, target_token_ids) if target_token_ids else None
+        
+        return probabilities, loss
 
 if __name__ == "__main__":
     batch_size = 2
@@ -180,13 +249,24 @@ if __name__ == "__main__":
     print('\n\n-------------- test causal multi-head self-attention mechanism -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
-    mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len)
+    mask = Mask(max_seq_len)
+    mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len, mask)
     y = mhsa(x, dropout_rate)
     print(get_shape(y))
 
     print('\n\n-------------- test residual layer -------------')
     x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
-    layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult)
+    mask = Mask(max_seq_len)
+    layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult, mask)
     y = layer(x, dropout_rate)
     print(get_shape(y))
+
+    print('\n\n-------------- test gpt model -------------')
+    config = Config()
+    gpt = GPT(config)
+    input_token_ids = [[r.randint(0, config.vocab_len - 1) for _ in range(config.max_seq_len)] for _ in range(config.batch_size)]
+    target_token_ids = [[r.randint(0, config.vocab_len - 1) for _ in range(config.max_seq_len)] for _ in range(config.batch_size)]
+    probabilities, loss = gpt(input_token_ids, target_token_ids)
+    pretty_tensor_print(probabilities)
+    print(loss)

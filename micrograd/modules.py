@@ -73,21 +73,21 @@ class CrossEntropyLoss(Module):
         self.vocab_len = vocab_len
         self.pad_token = pad_token
 
-    def __call__(self, logits, targets):
+    def __call__(self, probabilities, targets):
         '''
         inputs: 
-        logits - list of lists of lists of shape (batch_size, seq_len, vocab_len) full of Value objects
+        probabilities - list of lists of lists of shape (batch_size, seq_len, vocab_len) full of Value objects
         targets - list of lists of shape (batch_size, seq_len) full of integers representing token indices
 
         output: a single Value object representing loss of the model
         '''
         assert isinstance(targets, list) and isinstance(targets[0], list) and isinstance(targets[0][0], int)
-        assert len(logits) == len(targets) and len(logits[0]) == len(targets[0])
-        # prolly should assert that each vec in logits is a valid distribution (sums to 1), but i'm lazy
+        assert len(probabilities) == len(targets) and len(probabilities[0]) == len(targets[0])
+        # prolly should assert that each vec in probabilities is a valid distribution (sums to 1), but i'm lazy
                                                   
         one_hots = vector_wise_apply(self._one_hot, targets)
-        log_logits = vector_wise_apply(log, logits)
-        individual_losses = entry_wise_mult(one_hots, log_logits)
+        log_probabilities = vector_wise_apply(log, probabilities)
+        individual_losses = entry_wise_mult(one_hots, log_probabilities)
 
         # sum then multiply by -1
         return -1 * vector_wise_apply(sum, vector_wise_apply(sum, vector_wise_apply(sum, individual_losses)))
@@ -98,7 +98,7 @@ class CrossEntropyLoss(Module):
         meant to be used with vector_wise_apply
         '''
         assert all(isinstance(t, int) for t in targets_vec)
-        return [[0] * t + [1] + [0] * (vocab_len - t - 1) for t in targets_vec]
+        return [[0] * t + [1] + [0] * (self.vocab_len - t - 1) for t in targets_vec]
 
 if __name__ == "__main__":
     batch_size = 2
@@ -138,10 +138,10 @@ if __name__ == "__main__":
 
     print('\n\n-------------- test cross-entropoy loss -------------')
     logits = [[[Value(r.uniform(-1,1)).exp() for _ in range(vocab_len)] for _ in range(seq_len)] for _ in range(batch_size)]
-    logits = vector_wise_apply(softmax, logits)
-    pretty_tensor_print(logits)
+    probabilities = vector_wise_apply(softmax, logits)
+    pretty_tensor_print(probabilities)
     celoss = CrossEntropyLoss(vocab_len, pad_token = vocab_len - 1)
     targets = [[r.randint(0, vocab_len - 1) for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(targets)
-    loss = celoss(logits, targets)
+    loss = celoss(probabilities, targets)
     print(loss)
