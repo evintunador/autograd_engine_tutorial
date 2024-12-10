@@ -12,7 +12,7 @@ class Module: # just to make our syntax the same as pytorch's
 
 class Embedding(Module):
     def __init__(self, num_classes: int, dim: int):
-        self.weight = [[Value(r.uniform(-1,1)) for _ in range(dim)] 
+        self.weight = [[Value(r.gauss(0,0.02)) for _ in range(dim)] 
                        for _ in range(num_classes)]
 
     def __call__(self, x):
@@ -33,7 +33,7 @@ class Embedding(Module):
 
 class Neuron(Module):
     def __init__(self, input_dim):
-        self.w = [Value(r.uniform(-1,1)) for _ in range(input_dim)]
+        self.w = [Value(r.gauss(0,0.02)) for _ in range(input_dim)]
         self.b = Value(0.0)
 
     def __call__(self, x):
@@ -124,20 +124,20 @@ if __name__ == "__main__":
     pretty_tensor_print(x)
     
     print('\n\n-------------- test linear layer on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     w = Linear(model_dim, head_dim)
     y = w(x)
     print(y)
     print('\n\n-------------- test linear layer on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     print('\n')
     y = vector_wise_apply(w, x)
     pretty_tensor_print(y)
 
     print('\n\n-------------- test cross-entropoy loss -------------')
-    logits = [[[Value(r.uniform(-1,1)).exp() for _ in range(vocab_len)] for _ in range(seq_len)] for _ in range(batch_size)]
+    logits = [[[Value(r.gauss(0,0.02)).exp() for _ in range(vocab_len)] for _ in range(seq_len)] for _ in range(batch_size)]
     probabilities = vector_wise_apply(softmax, logits)
     pretty_tensor_print(probabilities)
     celoss = CrossEntropyLoss(vocab_len, pad_token = vocab_len - 1)

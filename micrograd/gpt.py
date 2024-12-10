@@ -223,13 +223,13 @@ if __name__ == "__main__":
     dropout_rate = 0.1
 
     print('\n\n-------------- test layernorm on a single vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = layer_norm(x)
     print(y)
 
     print('\n\n-------------- test MLP on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     mlp = MultiLayerPerceptron(model_dim, 4 * model_dim, model_dim)
     y = mlp(x, dropout_rate)
@@ -240,14 +240,14 @@ if __name__ == "__main__":
     print(mask)
     pretty_tensor_print(mask(seq_len))
     pretty_tensor_print(mask(seq_len - 1))
-    x = [[[[Value(r.uniform(-1,1)) for _ in range(seq_len)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
+    x = [[[[Value(r.gauss(0,0.02)) for _ in range(seq_len)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     mask = Mask(max_seq_len)
     y = matrix_wise_apply(mask.masked_fill, x)
     pretty_tensor_print(y)
 
     print('\n\n-------------- test causal multi-head self-attention mechanism -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     mask = Mask(max_seq_len)
     mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len, mask)
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     print(get_shape(y))
 
     print('\n\n-------------- test residual layer -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     print(get_shape(x))
     mask = Mask(max_seq_len)
     layer = ResidualLayer(model_dim, num_heads, head_dim, max_seq_len, mlp_mult, mask)

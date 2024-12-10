@@ -316,8 +316,11 @@ def softmax(vec):
     '''
     assert isinstance(vec, list), "vec should be a list of Value objects"
     assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    # Subtract the max value from each element for numerical stability
+    max_val = max(x.data for x in vec)
+    vec_shifted = [x - max_val for x in vec]
     # perform entry-wise exponentiation
-    vec_exp = exp(vec)
+    vec_exp = exp(vec_shifted)
     # calculate the sum of the newly exponentiated vector
     sum_vec_exp = sum(vec_exp)
     # return a vector of each exponentiated entry divided by the sum
@@ -347,7 +350,7 @@ if __name__ == "__main__":
     head_dim = model_dim // num_heads
 
     print('\n\n-------------- test get_shape -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     print('\n')
     print(get_shape(x))
@@ -357,38 +360,38 @@ if __name__ == "__main__":
     pretty_tensor_print(nested_list)
 
     print('\n\n-------------- test split_dim on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = split_dim(x, dims=(num_heads, head_dim))
     pretty_tensor_print(y)
     print('\n\n-------------- test split_dim on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     print('\n')
     y = vector_wise_apply(split_dim, tensor = x, dims=(num_heads, head_dim))
     pretty_tensor_print(y)
 
     print('\n\n-------------- test flatten on a tensor -------------')
-    x = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)] for _ in range(num_heads)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[[Value(r.gauss(0,0.02)) for _ in range(head_dim)] for _ in range(num_heads)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     y = matrix_wise_apply(flatten, x)
     print(get_shape(y))
     pretty_tensor_print(y)
 
     print('\n\n-------------- test transpose on a single matrix -------------')
-    x = [[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)]
+    x = [[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)]
     pretty_tensor_print(x)
     print('\n')
     y = transpose_matrix(x)
     pretty_tensor_print(y)
     print('\n\n-------------- test transpose on tensor of more than 2 dims, but only last 2 dims are to be transposed -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     print('\n')
     y = matrix_wise_apply(transpose_matrix, x)
     pretty_tensor_print(y)
     print('\n\n-------------- test transpose of any arbitrary combination of dimensions -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     print('\n')
     dims=(0, 2)
@@ -397,47 +400,47 @@ if __name__ == "__main__":
     pretty_tensor_print(y)
 
     print('\n\n-------------- test entry-wise add by a single scalar on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = add_scalar_to_vec(x, 100.)
     print(y)
     
     print('\n\n-------------- test entry-wise mult by a single scalar on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = mult_vec_by_scalar(x, 2.)
     print(y)
     
     print('\n\n-------------- test entry-wise addition for tensors -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
-    y = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    y = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(y)
     print('\n')
     z = entry_wise_add(x, y)
     pretty_tensor_print(z)
     
     print('\n\n-------------- test entry-wise multiplication for tensors -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
-    y = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    y = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(y)
     print('\n')
     z = entry_wise_mult(x, y)
     pretty_tensor_print(z)
 
     print('\n\n-------------- test sum on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)).exp() for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)).exp() for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     y = vector_wise_apply(sum, x)
     pretty_tensor_print(y)
 
     print('\n\n-------------- test tensor matmul -------------')
-    q = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
+    q = [[[[Value(r.gauss(0,0.02)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
     pretty_tensor_print(q)
     print('\n')
-    k = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
-    v = [[[[Value(r.uniform(-1,1)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
+    k = [[[[Value(r.gauss(0,0.02)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
+    v = [[[[Value(r.gauss(0,0.02)) for _ in range(head_dim)] for _ in range(seq_len)] for _ in range(num_heads)] for _ in range(batch_size)]
     k_transpose = transpose(k, dims=(2,3))
     pretty_tensor_print(k_transpose)
     print('\n')
@@ -448,36 +451,36 @@ if __name__ == "__main__":
     pretty_tensor_print(out)
 
     print('\n\n-------------- test relu on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = relu(x)
     print(y)
 
     print('\n\n-------------- test exp on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = exp(x)
     print(y)
 
     print('\n\n-------------- test softmax on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = softmax(x)
     print(y)
 
     print('\n\n-------------- test log on a vector -------------')
-    x = [Value(r.uniform(-1,1)) for _ in range(model_dim)]
+    x = [Value(r.gauss(0,0.02)) for _ in range(model_dim)]
     print(x)
     y = log(softmax(x))
     print(y)
     print('\n\n-------------- test log on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     y = vector_wise_apply(log, vector_wise_apply(softmax, x))
     pretty_tensor_print(y)
 
     print('\n\n-------------- test dropout on a tensor -------------')
-    x = [[[Value(r.uniform(-1,1)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
+    x = [[[Value(r.gauss(0,0.02)) for _ in range(model_dim)] for _ in range(seq_len)] for _ in range(batch_size)]
     pretty_tensor_print(x)
     rate = 0.5
     y = vector_wise_apply(dropout, x, rate)
