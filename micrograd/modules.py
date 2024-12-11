@@ -10,27 +10,6 @@ class Module: # just to make our syntax the same as pytorch's
     def parameters(self):
         return []
 
-class Embedding(Module):
-    def __init__(self, num_classes: int, dim: int):
-        self.weight = [[Value(r.gauss(0,0.02)) for _ in range(dim)] 
-                       for _ in range(num_classes)]
-
-    def __call__(self, x):
-        assert isinstance(x, list), "x should be a list of integers"
-        assert all(isinstance(idx, int) for idx in x), "All elements in x must be integers"
-        # grab embedding assigned to each token
-        out = [self.weight[idx] for idx in x]
-        return out[0] if len(out) == 1 else out
-
-    def __repr__(self):
-        weights_repr = "\n".join(
-            f"[{', '.join(str(p) for p in row)}]" for row in self.weight
-        )
-        return f"Embedding with weights:\n{weights_repr}"
-
-    def parameters(self):
-        return [p for c in self.weight for p in c]
-
 class Neuron(Module):
     def __init__(self, input_dim):
         self.w = [Value(r.gauss(0,0.02)) for _ in range(input_dim)]
@@ -67,6 +46,27 @@ class Linear(Module):
 
     def __repr__(self):
         return f"Layer of [{', '.join(str(n) for n in self.neurons)}]"
+
+class Embedding(Module):
+    def __init__(self, num_classes: int, dim: int):
+        self.weight = [[Value(r.gauss(0,0.02)) for _ in range(dim)] 
+                       for _ in range(num_classes)]
+
+    def __call__(self, x):
+        assert isinstance(x, list), "x should be a list of integers"
+        assert all(isinstance(idx, int) for idx in x), "All elements in x must be integers"
+        # grab embedding assigned to each token
+        out = [self.weight[idx] for idx in x]
+        return out[0] if len(out) == 1 else out
+
+    def __repr__(self):
+        weights_repr = "\n".join(
+            f"[{', '.join(str(p) for p in row)}]" for row in self.weight
+        )
+        return f"Embedding with weights:\n{weights_repr}"
+
+    def parameters(self):
+        return [p for row in self.weight for p in row]
 
 class CrossEntropyLoss(Module):
     def __init__(self, vocab_len: int, pad_token: int = None):

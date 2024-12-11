@@ -2,19 +2,6 @@ import random as r
 from modules import *
 from ops import *
 
-class Config:
-    def __init__(self):
-        self.batch_size = 2
-        self.vocab_len = 10
-        self.model_dim = 8
-        self.max_seq_len = 5
-        self.seq_len = 3
-        self.num_heads = 2
-        self.head_dim = self.model_dim // self.num_heads
-        self.mlp_mult = 4
-        self.dropout_rate = 0.1
-        self.num_layers = 2
-
 def layer_norm(x):
     '''
     Layer normalization module that only takes as input a single vector, 
@@ -78,6 +65,9 @@ class MultiHeadSelfAttention(Module):
         self.mask = mask
         
         self.Wo = Linear(num_heads * head_dim, model_dim)
+
+    def parameters(self):
+        return self.Wq.parameters() + self.Wk.parameters() + self.Wv.parameters() + self.Wo.parameters()
     
     def __call__(self, x, dropout_rate):
         assert isinstance(x, list) and isinstance(x[0], list) and isinstance(x[0][0], list) and isinstance(x[0][0][0], Value),\
@@ -137,7 +127,8 @@ class MultiLayerPerceptron(Module):
         return vector_wise_apply(dropout, down, dropout_rate)
 
     def parameters(self):
-        return [p for p in self.up.parameters()] + [p for p in self.down.parameters()]
+        #return [p for p in self.up.parameters()] + [p for p in self.down.parameters()]
+        return self.up.parameters() + self.down.parameters()
 
     def __repr__(self):
         return f"MLP of [{self.up}, {self.down}]"
@@ -146,6 +137,9 @@ class ResidualLayer(Module):
     def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult, mask):
         self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len, mask)
         self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
+
+    def parameters(self):
+        return self.mhsa.parameters() + self.mlp.parameters()
 
     def __call__(self, x, dropout_rate):
         x_normed = vector_wise_apply(layer_norm, x)
@@ -157,15 +151,14 @@ class ResidualLayer(Module):
 
 class GPT(Module):
     def __init__(self, config):
-        self.vocab_len = config.vocab_len
-        self.model_dim = config.model_dim
-        self.max_seq_len = config.max_seq_len
-        self.seq_len = config.seq_len
-        self.num_heads = config.num_heads
-        self.head_dim = config.head_dim
-        self.mlp_mult = config.mlp_mult
-        self.dropout_rate = config.dropout_rate
-        self.num_layers = config.num_layers
+        self.vocab_len = config['vocab_len']
+        self.model_dim = config['model_dim']
+        self.max_seq_len = config['max_seq_len']
+        self.num_heads = config['num_heads']
+        self.head_dim = config['head_dim']
+        self.mlp_mult = config['mlp_mult']
+        self.dropout_rate = config['dropout_rate']
+        self.num_layers = config['num_layers']
 
         self.tok_embeddings = Embedding(self.vocab_len, self.model_dim)
         self.scale = self.model_dim ** -0.5
@@ -174,11 +167,18 @@ class GPT(Module):
         self.mask = Mask(self.max_seq_len)
         
         self.layers = [ResidualLayer(self.model_dim, self.num_heads, self.head_dim, self.max_seq_len, self.mlp_mult, self.mask) 
-                       for _ in range(config.num_layers)]
+                       for _ in range(self.num_layers)]
 
         self.output_proj = Linear(self.model_dim, self.vocab_len)
 
         self.criterion = CrossEntropyLoss(self.vocab_len, pad_token = self.vocab_len - 1)
+
+    def parameters(self):
+        layer_params = []
+        for layer in self.layers:
+            layer_params += layer.parameters()
+        other_params = self.tok_embeddings.parameters() + self.pos_embeddings.parameters() + self.output_proj.parameters()
+        return layer_params + other_params
 
     def __call__(self, input_token_ids, target_token_ids = None):
         input_shape = get_shape(input_token_ids)
@@ -263,10 +263,19 @@ if __name__ == "__main__":
     print(get_shape(y))
 
     print('\n\n-------------- test gpt model -------------')
-    config = Config()
+    config = {
+        'vocab_len':10,
+        'model_dim':8,
+        'max_seq_len':5,
+        'num_heads':2,
+        'head_dim':4,
+        'mlp_mult':4,
+        'dropout_rate':0.1,
+        'num_layers':2
+    }
     gpt = GPT(config)
-    input_token_ids = [[r.randint(0, config.vocab_len - 1) for _ in range(config.max_seq_len)] for _ in range(config.batch_size)]
-    target_token_ids = [[r.randint(0, config.vocab_len - 1) for _ in range(config.max_seq_len)] for _ in range(config.batch_size)]
+    input_token_ids = [[r.randint(0, config['vocab_len'] - 1) for _ in range(config['max_seq_len'])] for _ in range(batch_size)]
+    target_token_ids = [[r.randint(0, config['vocab_len'] - 1) for _ in range(config['max_seq_len'])] for _ in range(batch_size)]
     probabilities, loss = gpt(input_token_ids, target_token_ids)
     pretty_tensor_print(probabilities)
     print(loss)
