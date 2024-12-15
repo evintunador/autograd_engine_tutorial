@@ -98,7 +98,10 @@ class CrossEntropyLoss(Module):
         meant to be used with vector_wise_apply
         '''
         assert all(isinstance(t, int) for t in targets_vec)
-        return [[0] * t + [1] + [0] * (self.vocab_len - t - 1) for t in targets_vec]
+        return [[0] * t + [1] + [0] * (self.vocab_len - t - 1) 
+                if t != self.pad_token 
+                else [0] * self.vocab_len
+                for t in targets_vec]
 
 if __name__ == "__main__":
     batch_size = 2

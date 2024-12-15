@@ -68,7 +68,7 @@ def split_dim(vec, dims):
     splits input vector of shape (dims[0] + dims[1]) into matrix of shape (dims[0], dims[1])
     '''
     assert isinstance(vec, list), "vec should be a list of Value objects"
-    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    assert all(isinstance(x, (int, float, Value)) for x in vec), "All elements in vec must be float, int, or Value objects"
     assert len(dims) == 2
     assert len(vec) == dims[0] * dims[1], f'vector length {len(vec)} must match desired reshape ({dims[0]},{dims[1]})'
 
@@ -332,6 +332,7 @@ def log(vec):
     '''
     assert isinstance(vec, list), "vec should be a list of Value objects"
     assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    assert all(x.data > 0 for x in vec), f"All elements in vec must be >0, but instead are: {vec}"
     return [x.log() for x in vec]
 
 def dropout(vec, rate = 0.1):
