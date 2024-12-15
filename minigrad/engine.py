@@ -5,33 +5,36 @@ class Tensor:
     def __init__(self, data, _children: tuple =()):
         if isinstance(data, list):
             self.data = np.array(data)
-            self.grad = np.zeros_like(self.data)
         elif isinstance(data, (np.ndarray, np.float64)):
             self.data = data
-            self.grad = np.zeros_like(data)
         elif isinstance(data, Tensor):
             self.data = data.data
-            self.grad = np.zeros_like(data.data)
         else:
             raise ValueError('input must either be list, np.ndarray, np.float64, or Tensor')
+        self.grad = np.zeros_like(self.data)
+        
         self.shape = self.data.shape
         self.ndim = self.data.ndim
+        
         self._prev = set(_children)
         self._backward = lambda: None
 
     def __repr__(self):
-        if isinstance(self.data, Tensor): # numpy prints "Tensor:\n..." by default and this supresses that
-            return f"Tensor:\n({self.data.data})\nGrad:\n({self.grad.data})"
+        #if isinstance(self.data, Tensor): # numpy prints "Tensor:\n..." by default and this supresses that
+            #return f"Tensor:\n({self.data.data})\nGrad:\n({self.grad.data})"
         return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
-    def __add__(self, other):
+    def __add__(self, other): # entry-wise addition
+        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
+                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
+        
         if isinstance(other, (float, int)):
             out = Tensor(self.data + other, (self,))
             def _backward():
                 self.grad += out.grad
             out._backward = _backward
             
-        elif isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float64, Tensor)):
             ### assert working shape - only implementing shapes we expect in order to simplify backprop
             # either shapes are exact same (eg. residual connection) or
             # final dim of self is same as *only* dim of other (eg. linear layer biases)
@@ -39,25 +42,26 @@ class Tensor:
                     (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
                     f'input shapes {self.shape} and {other.shape} invalid for entry-wise addition'
 
+            # ensure other is of type Tensor in order to simplify later code
+            if not isinstance(other, Tensor): other = Tensor(other)
+                # if other does not start off as a tensor then the gradient that gets recorded here 
+                # will get ignored when the fwd pass inputs a fresh non-tensor every time
+
             # calc forward pass
-            other = other if isinstance(other, Tensor) else Tensor(other)
-            if self.shape != other.shape:
-                out = Tensor(self.data + np.broadcast_to(other.data, self.shape), (self, other))
-            else:
-                out = Tensor(self.data + other.data, (self, other))
+            out = Tensor(self.data + other.data, (self, other)) if self.shape == other.shape else \
+                    Tensor(self.data + np.broadcast_to(other.data, self.shape), (self, other))
             
             def _backward():
                 self.grad += out.grad
                 if self.shape == other.shape:
                     other.grad += out.grad
                 else:
+                    # we'll iterate through the dims until we find the one where they become equal
                     for i, (self_dim, other_dim) in enumerate(zip(self.shape, other.shape)):
                         if self_dim != other_dim: break
+                    # then we'll use that dim to inform our calculation
                     other.grad += np.sum(out.grad, axis = i).reshape(other.shape)
             out._backward = _backward
-            
-        else:
-            raise ValueError('input must either be int, float, np.ndarray, np.float64, or Tensor')
         
         return out
 
@@ -66,7 +70,11 @@ class Tensor:
         return self + other
 
     def __neg__(self):
-        return self.data * -1
+        out = Tensor(self.data * -1, (self,))
+        def _backward():
+            self.grad += -1 * out.grad
+        out._backward = _backward
+        return out
 
     def __sub__(self, other): 
         # so instead of writing its own we can just take advantage of __add__ and __neg__
@@ -77,7 +85,7 @@ class Tensor:
 
     def __mul__(self, other): # entry-wise multiplication
         assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
-            f'input must either be int, float, np.ndarray, np.float64, or Tensor, not {type(other)}'
+                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
             out = Tensor(self.data * other, (self,))
@@ -85,7 +93,7 @@ class Tensor:
                 self.grad += other * out.grad
             out._backward = _backward
             
-        elif isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float64, Tensor)):
             ### assert working shape - only implementing shapes we expect in order to simplify backprop
             # either shapes are exact same (eg. GLU hidden dimension mult) or
             # final dim of self is same as *only* dim of other (eg. norm affine scaling)
@@ -93,25 +101,42 @@ class Tensor:
                     (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
                     f'input shapes {self.shape} and {other.shape} invalid for entry-wise multiplication'
 
+            # ensure other is of type Tensor in order to simplify later code
+            if not isinstance(other, Tensor): other = Tensor(other)
+                # if other does not start off as a tensor then the gradient that gets recorded here 
+                # will get ignored when the fwd pass inputs a fresh non-tensor every time
+
             # calc forward pass
-            other = other if isinstance(other, Tensor) else Tensor(other)
-            out = Tensor(self.data * other.data, (self, other))
+            out = Tensor(self.data * other.data, (self, other)) if self.shape == other.shape else \
+                    Tensor(self.data * np.broadcast_to(other.data, self.shape), (self, other))
             
             def _backward():
                 self.grad += other.data * out.grad
                 if self.shape == other.shape:
                     other.grad += self.data * out.grad
                 else:
+                    # we'll iterate through the dims until we find the one where they become equal
                     for i, (self_dim, other_dim) in enumerate(zip(self.shape, other.shape)):
                         if self_dim != other_dim: break
+                    # then we'll use that dim to inform our calculation
                     other.grad += np.sum(self.data * out.grad, axis = i).reshape(other.shape)
             out._backward = _backward
             
         return out
 
     def __truediv__(self, other):
-        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)), \
-            f'Input must be int, float, np.ndarray, np.float64, or Tensor, not {type(other)}'
+        """
+        Perform element-wise division: self / other, with support for broadcasting.
+        
+        Forward pass:
+          out = x / y
+        
+        Backward pass:
+          d/dx (x/y) = 1 / y
+          d/dy (x/y) = -x / (y^2)
+        """
+        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
+                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
             out = Tensor(self.data / other, (self,))
@@ -119,104 +144,77 @@ class Tensor:
                 self.grad += out.grad / other
             out._backward = _backward
         
-        elif isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float64, Tensor)):
             ### Assert working shape - handling broadcasting as in __mul__
             # Either shapes are the same or broadcasting is required
-            other = other if isinstance(other, Tensor) else Tensor(other)
-            
-            # Determine if broadcasting is needed
+            assert ((self.shape == other.shape) or
+                    (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
+                    f'input shapes {self.shape} and {other.shape} invalid for entry-wise division'
+
+            # ensure other is of type Tensor in order to simplify later code
+            if not isinstance(other, Tensor): other = Tensor(other)
+                # if other does not start off as a tensor then the gradient that gets recorded here 
+                # will get ignored when the fwd pass inputs a fresh non-tensor every time
+
+            # calc forward pass; Determine if broadcasting is needed
             if self.shape != other.shape:
-                # Broadcasting occurs; need to handle gradients carefully
+                # Broadcast both arrays to a common shape before division
                 broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
                 self_data_broadcasted = np.broadcast_to(self.data, broadcast_shape)
                 other_data_broadcasted = np.broadcast_to(other.data, broadcast_shape)
                 out_data = self_data_broadcasted / other_data_broadcasted
             else:
-                # Shapes are the same; element-wise division
+                # Shapes are the same; no broadcasting required
                 out_data = self.data / other.data
-            
+                
             out = Tensor(out_data, (self, other))
             
             def _backward():
-                # Compute gradients considering broadcasting
-                grad = out.grad
+                ### Compute gradients considering broadcasting
+                # local grad for slef (the numerator): d/dx (x/y) = 1/y
                 if self.shape != out.shape:
-                    # Sum over broadcasted dimensions for self.grad
-                    axis = tuple([i for i, (s_dim, o_dim) in enumerate(zip(self.shape, out.shape)) if s_dim != o_dim])
-                    self_grad = (grad / other.data).sum(axis=axis).reshape(self.shape)
-                    self.grad += self_grad
+                    # identify broadcasted dimensions
+                    axes = tuple(i for i, (self_dim, other_dim) in enumerate(zip(self.shape, out.shape)) if self_dim != other_dim)
+                    # sum over broadcasted dimensions since gradient must be reduced back to self's shape
+                    self.grad += (out.grad / other.data).sum(axis=axes).reshape(self.shape)
                 else:
-                    self.grad += grad / other.data
-                
+                    self.grad += out.grad / other.data
+                # local grad for other (the denominator): d/dy (x/y) = -x / (y^2)
                 if other.shape != out.shape:
-                    # Sum over broadcasted dimensions for other.grad
-                    axis = tuple([i for i, (o_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if o_dim != out_dim])
-                    other_grad = (-self.data * grad / (other.data ** 2)).sum(axis=axis).reshape(other.shape)
-                    other.grad += other_grad
+                    # identify broadcasted dimensions
+                    axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
+                    # sum over broadcasted dimensions since gradient must be reduced back to self's shape
+                    other.grad += (-self.data / (other.data ** 2) * out.grad).sum(axis=axes).reshape(other.shape)
                 else:
-                    other.grad += -self.data * grad / (other.data ** 2)
+                    other.grad += (-self.data / (other.data ** 2)) * out.grad
             out._backward = _backward
-        
-        else:
-            raise ValueError('Unsupported type for division')
         
         return out
-        
-        '''
-    def __truediv__(self, other):
-        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)), \
-            f'Input must be int, float, np.ndarray, np.float64, or Tensor, not {type(other)}'
-        
-        if isinstance(other, (float, int)):
-            out = Tensor(self.data / other, (self,))
-            def _backward():
-                self.grad += out.grad / other
-            out._backward = _backward
-            
-        elif isinstance(other, (np.ndarray, np.float64, Tensor)):
-            ### assert working shape - only implementing shapes we expect in order to simplify backprop
-            # either shapes are exact same (eg. GLU hidden dimension mult) or
-            # final dim of self is same as *only* dim of other (eg. division during softmax calc)
-            assert ((self.shape == other.shape) or
-                    (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
-                    f'input shapes {self.shape} and {other.shape} invalid for entry-wise division'
-            
-            other = other if isinstance(other, Tensor) else Tensor(other)
-            out = Tensor(self.data / other.data, (self, other))
-            
-            def _backward():
-                self.grad += out.grad / other.data
-                other.grad -= (self.data * out.grad) / (other.data ** 2)
-                    # bc chain rule w/ starting exponent on other.data as -1
-                if self.shape == other.shape:
-                    other.grad -= (self.data * out.grad) / (other.data ** 2)
-                else:
-                    for i, (self_dim, other_dim) in enumerate(zip(self.shape, other.shape)):
-                        if self_dim != other_dim: break
-                    other.grad -= (self.data * out.grad) / (other.data ** 2).reshape(self.shape)
-            out._backward = _backward
-        
-        return out'''
         
     def sum(self, dim: int = -1):
         out = Tensor(np.sum(self.data, axis = dim), (self,))
         def _backward():
-            self.grad += np.broadcast_to(out.grad, self.shape) / self.shape[dim] # is the divide necessary?
+            self.grad += np.broadcast_to(out.grad, self.shape)
         out._backward = _backward
         return out
         
     def __matmul__(self, other):
         assert isinstance(other, (list, np.ndarray, np.float64, Tensor)), \
             f"x2 must be list, np.ndarray, np.float64, Tensor"
-        other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.data.shape[-1] == other.data.shape[0], \
-            f"x1 shape ({self.data.shape[-1]}) must match x2 shape ({self.data.shape[-1]})"
-        
-        out = Tensor(self.data @ other.data, (self, other)) # (m,n) @ (n,p) -> (m,p)
+        if not isinstance(other, Tensor): other = Tensor(other)
+        assert self.ndim >= 2 and other.ndim >= 2, \
+            f'Both tensors must have at least 2 dimensions for matrix multiplication: Got x1:{self.ndim}, x2:{other.ndim}'
+        assert self.shape[-1] == other.shape[-2], \
+            f"Mismatch in matrix multiplication dimensions: {self.shape[-1]} != {other.shape[-2]}"
+        assert other.shape[:-1] == () or other.shape[:-2] == self.shape[:-2], \
+            f"Preceding dimensions must either match exactly or be absent. Got x1:{self.shape[:-2]}, x2:{other.shape[:-2]}"
+
+        # calc forward pass
+        out = Tensor(self.data @ other.data, (self, other)) # (..., m, n) @ (..., n, p) -> (..., m, p)
         
         def _backward():
-            self.grad += out.grad @ other.data.transpose() # (m,p) @ (n,p).T -> (m,p) @ (p,n) -> (m,n)
-            other.grad += self.data.transpose() @ out.grad # (m,n).T @ (m,p) -> (n,m) @ (m,p) -> (n,p)
+            self.grad += out.grad @ other.data.transpose() # (..., m, p)   @ (..., n, p).T -> (..., m, p) @ (..., p, n) -> (..., m, n)
+            other.grad += self.data.transpose() @ out.grad # (..., m, n).T @ (..., m, p)   -> (..., n, m) @ (..., m, p) -> (..., n, p)
         out._backward = _backward
         
         return out
@@ -250,11 +248,11 @@ class Tensor:
 
     def broadcast_to(self, shape: tuple):
         assert self.shape != shape, f"broadcast shape {shape} must be different from original {self.shape}"
-        out = Tensor(np.broadcast_to(self.data, shape), (self,))
         for i in range(self.ndim):
             if self.shape[i] != shape:
                 dim = i
-        assert self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[i]}"
+        assert dim and self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[i]}"
+        out = Tensor(np.broadcast_to(self.data, shape), (self,))
         def _backward():
             self.grad += np.sum(out.grad, axis=dim)
         out.backward = _backward
