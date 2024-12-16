@@ -193,14 +193,14 @@ class Tensor:
         out = Tensor(np.exp(self.data), (self,))
         def _backward():
             self.grad += out.data * out.grad # derivative of e^x is just e^x, therefore out.data
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def relu(self):
         out = Tensor(np.maximum(0, self.data), (self,))
         def _backward():
             self.grad += (out.data > 0) * out.grad
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def max(self, axis = None):
@@ -233,28 +233,28 @@ class Tensor:
         out = Tensor(self.data ** pow, (self,))
         def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
             self.grad += out.grad * pow * self.data ** (pow - 1)
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def transpose(self):
         out = Tensor(self.data.transpose(), (self,))
         def _backward():
             self.grad += out.grad.transpose()
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def squeeze(self, dim):
         out = Tensor(np.squeeze(self.data, axis=dim), (self,))
         def _backward():
             self.grad += np.expand_dims(out.grad, axis=dim)
-        out.backward = _backward
+        out._backward = _backward
         return out
         
     def unsqueeze(self, dim):
         out = Tensor(np.expand_dims(self.data, axis=dim), (self,))
         def _backward():
             self.grad += np.squeeze(out.grad, axis=dim)
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def broadcast_to(self, shape: tuple):
@@ -266,7 +266,7 @@ class Tensor:
         out = Tensor(np.broadcast_to(self.data, shape), (self,))
         def _backward():
             self.grad += np.sum(out.grad, axis=dim)
-        out.backward = _backward
+        out._backward = _backward
         return out
 
     def backward(self):
