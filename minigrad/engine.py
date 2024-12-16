@@ -35,12 +35,7 @@ class Tensor:
             out._backward = _backward
             
         if isinstance(other, (np.ndarray, np.float64, Tensor)):
-            ### assert working shape - only implementing shapes we expect in order to simplify backprop
-            # either shapes are exact same (eg. residual connection) or
-            # final dim of self is same as *only* dim of other (eg. linear layer biases)
-            assert ((self.shape == other.shape) or 
-                    (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
-                    f'input shapes {self.shape} and {other.shape} invalid for entry-wise addition'
+            assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
             # ensure other is of type Tensor in order to simplify later code
             if not isinstance(other, Tensor): other = Tensor(other)
@@ -53,14 +48,13 @@ class Tensor:
             
             def _backward():
                 self.grad += out.grad
-                if self.shape == other.shape:
+                if other.shape == self.shape:
                     other.grad += out.grad
                 else:
-                    # we'll iterate through the dims until we find the one where they become equal
-                    for i, (self_dim, other_dim) in enumerate(zip(self.shape, other.shape)):
-                        if self_dim != other_dim: break
-                    # then we'll use that dim to inform our calculation
-                    other.grad += np.sum(out.grad, axis = i).reshape(other.shape)
+                    # identify broadcasted dimensions
+                    axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
+                    # sum over broadcasted dimensions since gradient must be reduced back to self's shape
+                    other.grad += out.grad.sum(axis=axes).reshape(other.shape)
             out._backward = _backward
         
         return out
@@ -94,32 +88,26 @@ class Tensor:
             out._backward = _backward
             
         if isinstance(other, (np.ndarray, np.float64, Tensor)):
-            ### assert working shape - only implementing shapes we expect in order to simplify backprop
-            # either shapes are exact same (eg. GLU hidden dimension mult) or
-            # final dim of self is same as *only* dim of other (eg. norm affine scaling)
-            assert ((self.shape == other.shape) or
-                    (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
-                    f'input shapes {self.shape} and {other.shape} invalid for entry-wise multiplication'
-
+            assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
+            
             # ensure other is of type Tensor in order to simplify later code
             if not isinstance(other, Tensor): other = Tensor(other)
                 # if other does not start off as a tensor then the gradient that gets recorded here 
                 # will get ignored when the fwd pass inputs a fresh non-tensor every time
-
+            
             # calc forward pass
             out = Tensor(self.data * other.data, (self, other)) if self.shape == other.shape else \
                     Tensor(self.data * np.broadcast_to(other.data, self.shape), (self, other))
             
             def _backward():
                 self.grad += other.data * out.grad
-                if self.shape == other.shape:
+                if other.shape == self.shape:
                     other.grad += self.data * out.grad
                 else:
-                    # we'll iterate through the dims until we find the one where they become equal
-                    for i, (self_dim, other_dim) in enumerate(zip(self.shape, other.shape)):
-                        if self_dim != other_dim: break
-                    # then we'll use that dim to inform our calculation
-                    other.grad += np.sum(self.data * out.grad, axis = i).reshape(other.shape)
+                    # identify broadcasted dimensions
+                    axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
+                    # sum over broadcasted dimensions since gradient must be reduced back to self's shape
+                    other.grad += (out.grad * self.data).sum(axis=axes).reshape(other.shape)
             out._backward = _backward
             
         return out
@@ -145,48 +133,27 @@ class Tensor:
             out._backward = _backward
         
         if isinstance(other, (np.ndarray, np.float64, Tensor)):
-            ### Assert working shape - handling broadcasting as in __mul__
-            # Either shapes are the same or broadcasting is required
-            assert ((self.shape == other.shape) or
-                    (other.ndim == 1 and self.shape[-1] == other.shape[0])), \
-                    f'input shapes {self.shape} and {other.shape} invalid for entry-wise division'
-
             # ensure other is of type Tensor in order to simplify later code
             if not isinstance(other, Tensor): other = Tensor(other)
                 # if other does not start off as a tensor then the gradient that gets recorded here 
                 # will get ignored when the fwd pass inputs a fresh non-tensor every time
 
-            # calc forward pass; Determine if broadcasting is needed
-            if self.shape != other.shape:
-                # Broadcast both arrays to a common shape before division
-                broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
-                self_data_broadcasted = np.broadcast_to(self.data, broadcast_shape)
-                other_data_broadcasted = np.broadcast_to(other.data, broadcast_shape)
-                out_data = self_data_broadcasted / other_data_broadcasted
-            else:
-                # Shapes are the same; no broadcasting required
-                out_data = self.data / other.data
-                
-            out = Tensor(out_data, (self, other))
+            # calc forward pass
+            out = Tensor(self.data / other.data, (self, other)) if self.shape == other.shape else \
+                    Tensor(self.data / np.broadcast_to(other.data, self.shape), (self, other))
             
             def _backward():
                 ### Compute gradients considering broadcasting
-                # local grad for slef (the numerator): d/dx (x/y) = 1/y
-                if self.shape != out.shape:
-                    # identify broadcasted dimensions
-                    axes = tuple(i for i, (self_dim, other_dim) in enumerate(zip(self.shape, out.shape)) if self_dim != other_dim)
-                    # sum over broadcasted dimensions since gradient must be reduced back to self's shape
-                    self.grad += (out.grad / other.data).sum(axis=axes).reshape(self.shape)
-                else:
-                    self.grad += out.grad / other.data
+                # local grad for self (the numerator): d/dx (x/y) = 1/y
+                self.grad += out.grad / other.data
                 # local grad for other (the denominator): d/dy (x/y) = -x / (y^2)
-                if other.shape != out.shape:
+                if other.shape == self.shape:
+                    other.grad += (-self.data / (other.data ** 2)) * out.grad
+                else:
                     # identify broadcasted dimensions
                     axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
                     # sum over broadcasted dimensions since gradient must be reduced back to self's shape
                     other.grad += (-self.data / (other.data ** 2) * out.grad).sum(axis=axes).reshape(other.shape)
-                else:
-                    other.grad += (-self.data / (other.data ** 2)) * out.grad
             out._backward = _backward
         
         return out
@@ -227,7 +194,7 @@ class Tensor:
         def _backward():
             self.grad += out.data * out.grad # derivative of e^x is just e^x, therefore out.data
         out.backward = _backward
-        return ou
+        return out
 
     def relu(self):
         out = Tensor(np.maximum(0, self.data), (self,))
@@ -238,16 +205,19 @@ class Tensor:
 
     def max(self, axis = None):
         assert not axis or isinstance(axis, int)
-        return np.max(self.data) if axis is None else Tensor(np.max(self.data, axis=axis))
+        return np.max(self.data) if axis is None else np.max(self.data, axis=axis)
 
     def min(self, axis = None):
         assert not axis or isinstance(axis, int)
-        return np.min(self.data) if axis is None else Tensor(np.min(self.data, axis=axis))
+        return np.min(self.data) if axis is None else np.min(self.data, axis=axis)
 
     def softmax(self, dim: int = -1):
+        # the gradient for the stability subtraction wouldn't change anything since it's addition
+        self.data -= np.max(self.data, axis=dim)
         exps = self.exp()
         sum_exps = exps.sum(dim=dim)
         out = exps / sum_exps
+        # no backward pass bc each of these operations have them built in
         return out
 
     def transpose(self):
