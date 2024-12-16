@@ -196,6 +196,14 @@ class Tensor:
         out._backward = _backward
         return out
 
+    def log(self):
+        assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logaritm'
+        out = Tensor(np.log(self.data), (self,))
+        def _backward(): # local gradient: d/dx (ln(x)) = 1/x
+            self.grad += out.grad  / self.data
+        out._backward = _backward
+        return out
+
     def relu(self):
         out = Tensor(np.maximum(0, self.data), (self,))
         def _backward():
