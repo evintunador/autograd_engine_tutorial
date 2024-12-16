@@ -236,6 +236,14 @@ class Tensor:
         out.backward = _backward
         return out
 
+    def max(self, axis = None):
+        assert not axis or isinstance(axis, int)
+        return np.max(self.data) if axis is None else Tensor(np.max(self.data, axis=axis))
+
+    def min(self, axis = None):
+        assert not axis or isinstance(axis, int)
+        return np.min(self.data) if axis is None else Tensor(np.min(self.data, axis=axis))
+
     def softmax(self, dim: int = -1):
         exps = self.exp()
         sum_exps = exps.sum(dim=dim)
