@@ -277,6 +277,13 @@ class Tensor:
         out._backward = _backward
         return out
 
+    def reshape(self, shape: tuple):
+        out = Tensor(np.reshape(self.data, shape), (self,))
+        def _backward():
+            self.grad += np.reshape(out.grad, self.shape)
+        out._backward = _backward
+        return out
+
     def backward(self):
         topo = []
         visited = set()
