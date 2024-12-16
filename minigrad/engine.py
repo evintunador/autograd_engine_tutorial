@@ -225,6 +225,17 @@ class Tensor:
         print(sum_exps)
         return exps / sum_exps
 
+    def __pow__(self, pow: int):
+        '''
+        entry-wise exponentiation that supports integer powers
+        '''
+        assert isinstance(pow, int), f'power must be int but got {type(pow)}'
+        out = Tensor(self.data ** pow, (self,))
+        def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
+            self.grad += out.grad * pow * self.data ** (pow - 1)
+        out.backward = _backward
+        return out
+
     def transpose(self):
         out = Tensor(self.data.transpose(), (self,))
         def _backward():
