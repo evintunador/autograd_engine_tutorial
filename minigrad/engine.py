@@ -266,9 +266,9 @@ class Tensor:
     def broadcast_to(self, shape: tuple):
         assert self.shape != shape, f"broadcast shape {shape} must be different from original {self.shape}"
         for i in range(self.ndim):
-            if self.shape[i] != shape:
+            if self.shape[i] != shape[i]:
                 dim = i
-        assert dim and self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[i]}"
+        assert self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[dim]}"
         out = Tensor(np.broadcast_to(self.data, shape), (self,))
         def _backward():
             self.grad += np.sum(out.grad, axis=dim)
