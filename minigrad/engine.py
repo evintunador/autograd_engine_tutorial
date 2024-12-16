@@ -212,13 +212,18 @@ class Tensor:
         return np.min(self.data) if axis is None else np.min(self.data, axis=axis)
 
     def softmax(self, dim: int = -1):
-        # the gradient for the stability subtraction wouldn't change anything since it's addition
-        self.data -= np.max(self.data, axis=dim)
+        # to make make softmax stable (avoid numerical overflow during .exp()) we subtract by the maximum values)
+        maximums = np.max(self.data, axis=dim)
+        print(maximums)
+        self.data -= np.broadcast_to(np.expand_dims(maximums, axis=dim), self.shape)
+        # subtraction of max doesn't have to worry about gradient since local grad of addition is 1
+        # the following ops have their gradient calculated by all the Tensor methods that we call
+        print(self)
         exps = self.exp()
-        sum_exps = exps.sum(dim=dim)
-        out = exps / sum_exps
-        # no backward pass bc each of these operations have them built in
-        return out
+        sum_exps = exps.sum(dim=dim).unsqueeze(dim).broadcast_to(self.shape)
+        print(exps)
+        print(sum_exps)
+        return exps / sum_exps
 
     def transpose(self):
         out = Tensor(self.data.transpose(), (self,))
