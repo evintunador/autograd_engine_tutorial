@@ -244,10 +244,12 @@ class Tensor:
         out._backward = _backward
         return out
 
-    def transpose(self):
-        out = Tensor(self.data.transpose(), (self,))
+    def transpose(self, axes: tuple = None):
+        if axes is None: # defaults to transposing final two dims
+            axes = tuple(dim for dim in range(self.ndim - 2)) + (self.ndim - 1, self.ndim - 2)
+        out = Tensor(np.transpose(self.data, axes=axes), (self,))
         def _backward():
-            self.grad += out.grad.transpose()
+            self.grad += np.transpose(out.grad, axes=axes)
         out._backward = _backward
         return out
 
