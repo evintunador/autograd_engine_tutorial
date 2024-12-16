@@ -190,6 +190,9 @@ class Tensor:
             out._backward = _backward
         
         return out
+
+    def __rtruediv__(self, other):
+        return self / other
         
     def sum(self, dim: int = -1):
         out = Tensor(np.sum(self.data, axis = dim), (self,))
@@ -224,7 +227,7 @@ class Tensor:
         def _backward():
             self.grad += out.data * out.grad # derivative of e^x is just e^x, therefore out.data
         out.backward = _backward
-        return out
+        return ou
 
     def relu(self):
         out = Tensor(np.maximum(0, self.data), (self,))
@@ -243,6 +246,20 @@ class Tensor:
         out = Tensor(self.data.transpose(), (self,))
         def _backward():
             self.grad += out.grad.transpose()
+        out.backward = _backward
+        return out
+
+    def squeeze(self, dim):
+        out = Tensor(np.squeeze(self.data, axis=dim), (self,))
+        def _backward():
+            self.grad += np.expand_dims(out.grad, axis=dim)
+        out.backward = _backward
+        return out
+        
+    def unsqueeze(self, dim):
+        out = Tensor(np.expand_dims(self.data, axis=dim), (self,))
+        def _backward():
+            self.grad += np.squeeze(out.grad, axis=dim)
         out.backward = _backward
         return out
 
