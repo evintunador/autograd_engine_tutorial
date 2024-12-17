@@ -11,8 +11,8 @@ class Module: # just to make our syntax the same as pytorch's
 
 class Linear(Module):
     def __init__(self, input_dim: int, output_dim: int, bias = True):
-        self.weight = Tensor(np.random.normal(loc=0.0, scale=0.2, size=(input_dim, output_dim)))
-        if bias: self.bias = Tensor(np.random.normal(loc=0.0, scale=0.2, size=(1,output_dim)))
+        self.weight = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(input_dim, output_dim)).astype(np.float32))
+        if bias: self.bias = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(1,output_dim)))
 
     def __repr__(self):
         return f"Weight:\n({self.weight})\nBias:\n({self.bias})" if self.bias else f"Weight:\n({self.weight})"
@@ -28,20 +28,16 @@ class Linear(Module):
 
 class Embedding(Module):
     def __init__(self, num_classes: int, embed_dim: int):
-        self.weight = Tensor(np.random.normal(loc=0.0, scale=0.2, size=(num_classes, embed_dim)))
+        self.weight = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(num_classes, embed_dim)).astype(np.float32))
 
-    def __call__(self, x):
-        assert isinstance(x, list), "x should be a list of integers"
-        assert all(isinstance(idx, int) for idx in x), "All elements in x must be integers"
+    def __call__(self, tokens):
+        assert np.issubdtype(tokens.dtype, np.dtype('uint8')) or np.issubdtype(tokens.dtype, np.dtype('uint32')),\
+                f"input dtype should be uint8 or uint32 but instead got {tokens.dtype}"
         # grab embedding assigned to each token
-        out = [self.weight[idx] for idx in x]
-        return out[0] if len(out) == 1 else out
+        return self.weight[tokens]
 
     def __repr__(self):
-        weights_repr = "\n".join(
-            f"[{', '.join(str(p) for p in row)}]" for row in self.weight
-        )
-        return f"Embedding with weights:\n{weights_repr}"
+        return f"Emedding:\n({self.weight})"
 
     def parameters(self):
-        return [p for row in self.weight for p in row]
+        return [self.weight]

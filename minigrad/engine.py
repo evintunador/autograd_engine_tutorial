@@ -287,7 +287,7 @@ class Tensor:
         return out
 
     def __getitem__(self, idx):
-        # idx can be an int, slice, tuple of slices, etc.
+        # numpy handles the actual indexing behavior for us
         sliced_data = self.data[idx]
         out = Tensor(sliced_data, (self,))
         def _backward():
