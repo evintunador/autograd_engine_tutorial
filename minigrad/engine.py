@@ -286,6 +286,16 @@ class Tensor:
         out._backward = _backward
         return out
 
+    def __getitem__(self, idx):
+        # idx can be an int, slice, tuple of slices, etc.
+        sliced_data = self.data[idx]
+        out = Tensor(sliced_data, (self,))
+        def _backward():
+            # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
+            np.add.at(self.grad, idx, out.grad)
+        out._backward = _backward
+        return out
+
     def backward(self):
         topo = []
         visited = set()
