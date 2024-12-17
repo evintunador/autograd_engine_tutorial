@@ -12,7 +12,7 @@ class Module: # just to make our syntax the same as pytorch's
 class Linear(Module):
     def __init__(self, input_dim: int, output_dim: int, bias = True):
         self.weight = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(input_dim, output_dim)).astype(np.float32))
-        if bias: self.bias = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(1,output_dim)))
+        if bias: self.bias = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(1,output_dim)).astype(np.float32))
 
     def __repr__(self):
         return f"Weight:\n({self.weight})\nBias:\n({self.bias})" if self.bias else f"Weight:\n({self.weight})"
@@ -31,8 +31,8 @@ class Embedding(Module):
         self.weight = Tensor(np.random.normal(loc=0.0, scale=0.02, size=(num_classes, embed_dim)).astype(np.float32))
 
     def __call__(self, tokens):
-        assert np.issubdtype(tokens.dtype, np.dtype('uint8')) or np.issubdtype(tokens.dtype, np.dtype('uint32')),\
-                f"input dtype should be uint8 or uint32 but instead got {tokens.dtype}"
+        assert np.issubdtype(tokens.dtype, np.dtype('uint')),\
+                f"input dtype should be np.uint but instead got {tokens.dtype}"
         # grab embedding assigned to each token
         return self.weight[tokens]
 

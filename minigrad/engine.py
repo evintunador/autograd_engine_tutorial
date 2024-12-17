@@ -1,23 +1,33 @@
 import numpy as np
 
+from typing import Tuple, Union
+Arrayable = Union[float, int, np.ndarray, 'Tensor', 'Parameter']
+
 class Tensor:
     '''Stores a tensor and its gradient information'''
-    def __init__(self, data, _children: tuple =()):
-        if isinstance(data, list):
-            self.data = np.array(data)
-        elif isinstance(data, (np.ndarray, np.float32, np.float64)):
-            self.data = data
-        elif isinstance(data, Tensor):
-            self.data = data.data
+    def __init__(self, 
+                 data: Union[float, int, list, np.ndarray], 
+                 _children: Tuple[Union['Tensor', 'Parameter'], ...] = ()):
+        if isinstance(data, (int, float)):
+            data = np.array(data, dtype=np.float32)
+        elif isinstance(data, list):
+            data = np.array(data, dtype=np.float32)
+        elif isinstance(data, np.ndarray):
+            # ensure float type for consistency
+            if not np.issubdtype(data.dtype, np.floating):
+                data = data.astype(np.float32)
         else:
-            raise ValueError('input must either be list, np.ndarray, np.float32, np.float64, or Tensor')
+            raise ValueError('Invalid data type for Tensor.')
+        
+        self.data = data
         self.grad = np.zeros_like(self.data)
         
         self.shape = self.data.shape
         self.ndim = self.data.ndim
+        self.dtype = self.data.dtype
         
         self._prev = set(_children)
-        self._backward = lambda: None
+        self._backward = lambda: None  # function to compute local gradient updates
 
     def __repr__(self):
         #if isinstance(self.data, Tensor): # numpy prints "Tensor:\n..." by default and this supresses that
@@ -25,8 +35,8 @@ class Tensor:
         return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
     def __add__(self, other): # entry-wise addition
-        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
-                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
+        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
+                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
             out = Tensor(self.data + other, (self,))
@@ -34,7 +44,7 @@ class Tensor:
                 self.grad += out.grad
             out._backward = _backward
             
-        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, Tensor)):
             assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
             # ensure other is of type Tensor in order to simplify later code
@@ -78,8 +88,8 @@ class Tensor:
         return other + (-self)
 
     def __mul__(self, other): # entry-wise multiplication
-        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
-                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
+        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
+                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
             out = Tensor(self.data * other, (self,))
@@ -87,7 +97,7 @@ class Tensor:
                 self.grad += other * out.grad
             out._backward = _backward
             
-        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, Tensor)):
             assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
             
             # ensure other is of type Tensor in order to simplify later code
@@ -114,7 +124,7 @@ class Tensor:
 
     def __truediv__(self, other):
         """
-        Perform element-wise division: self / other, with support for broadcasting.
+        Perform element-wise division: self / other, with support for broadcasting of other
         
         Forward pass:
           out = x / y
@@ -123,8 +133,8 @@ class Tensor:
           d/dx (x/y) = 1 / y
           d/dy (x/y) = -x / (y^2)
         """
-        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
-                f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
+        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
+                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
             out = Tensor(self.data / other, (self,))
@@ -132,7 +142,7 @@ class Tensor:
                 self.grad += out.grad / other
             out._backward = _backward
         
-        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, Tensor)):
             # ensure other is of type Tensor in order to simplify later code
             if not isinstance(other, Tensor): other = Tensor(other)
                 # if other does not start off as a tensor then the gradient that gets recorded here 
@@ -169,8 +179,8 @@ class Tensor:
         return out
         
     def __matmul__(self, other):
-        assert isinstance(other, (list, np.ndarray, np.float32, np.float64, Tensor)), \
-            f"x2 must be list, np.ndarray, np.float32, np.float64, Tensor"
+        assert isinstance(other, (list, np.ndarray, Tensor)), \
+            f"x2 must be list, np.ndarray, Tensor"
         if not isinstance(other, Tensor): other = Tensor(other)
         assert self.ndim >= 2 and other.ndim >= 2, \
             f'Both tensors must have at least 2 dimensions for matrix multiplication: Got x1:{self.ndim}, x2:{other.ndim}'
@@ -309,3 +319,4 @@ class Tensor:
         self.grad = np.ones_like(self.grad)
         for node in reversed(topo):
             node._backward()
+
