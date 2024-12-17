@@ -5,12 +5,12 @@ class Tensor:
     def __init__(self, data, _children: tuple =()):
         if isinstance(data, list):
             self.data = np.array(data)
-        elif isinstance(data, (np.ndarray, np.float64)):
+        elif isinstance(data, (np.ndarray, np.float32, np.float64)):
             self.data = data
         elif isinstance(data, Tensor):
             self.data = data.data
         else:
-            raise ValueError('input must either be list, np.ndarray, np.float64, or Tensor')
+            raise ValueError('input must either be list, np.ndarray, np.float32, np.float64, or Tensor')
         self.grad = np.zeros_like(self.data)
         
         self.shape = self.data.shape
@@ -25,7 +25,7 @@ class Tensor:
         return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
     def __add__(self, other): # entry-wise addition
-        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
+        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
                 f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
@@ -34,7 +34,7 @@ class Tensor:
                 self.grad += out.grad
             out._backward = _backward
             
-        if isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
             assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
             # ensure other is of type Tensor in order to simplify later code
@@ -78,7 +78,7 @@ class Tensor:
         return other + (-self)
 
     def __mul__(self, other): # entry-wise multiplication
-        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
+        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
                 f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
@@ -87,7 +87,7 @@ class Tensor:
                 self.grad += other * out.grad
             out._backward = _backward
             
-        if isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
             assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
             
             # ensure other is of type Tensor in order to simplify later code
@@ -123,7 +123,7 @@ class Tensor:
           d/dx (x/y) = 1 / y
           d/dy (x/y) = -x / (y^2)
         """
-        assert isinstance(other, (float, int, np.ndarray, np.float64, Tensor)),\
+        assert isinstance(other, (float, int, np.ndarray, np.float32, np.float64, Tensor)),\
                 f'input must either be int, float, np.ndarray, np.float64, or Tensor but is {type(other)}'
         
         if isinstance(other, (float, int)):
@@ -132,7 +132,7 @@ class Tensor:
                 self.grad += out.grad / other
             out._backward = _backward
         
-        if isinstance(other, (np.ndarray, np.float64, Tensor)):
+        if isinstance(other, (np.ndarray, np.float32, np.float64, Tensor)):
             # ensure other is of type Tensor in order to simplify later code
             if not isinstance(other, Tensor): other = Tensor(other)
                 # if other does not start off as a tensor then the gradient that gets recorded here 
@@ -169,8 +169,8 @@ class Tensor:
         return out
         
     def __matmul__(self, other):
-        assert isinstance(other, (list, np.ndarray, np.float64, Tensor)), \
-            f"x2 must be list, np.ndarray, np.float64, Tensor"
+        assert isinstance(other, (list, np.ndarray, np.float32, np.float64, Tensor)), \
+            f"x2 must be list, np.ndarray, np.float32, np.float64, Tensor"
         if not isinstance(other, Tensor): other = Tensor(other)
         assert self.ndim >= 2 and other.ndim >= 2, \
             f'Both tensors must have at least 2 dimensions for matrix multiplication: Got x1:{self.ndim}, x2:{other.ndim}'
@@ -237,7 +237,7 @@ class Tensor:
         '''
         entry-wise exponentiation that supports integer powers
         '''
-        assert isinstance(pow, int), f'power must be int but got {type(pow)}'
+        assert isinstance(pow, (int, float)), f'power must be int or float but got {type(pow)}'
         out = Tensor(self.data ** pow, (self,))
         def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
             self.grad += out.grad * pow * self.data ** (pow - 1)
