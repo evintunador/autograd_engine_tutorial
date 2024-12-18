@@ -7,6 +7,7 @@ class Tensor:
     '''Stores a tensor and its gradient information'''
     def __init__(self, 
                  data: Union[float, int, list, np.ndarray], 
+                 requires_grad: bool = False, 
                  _children: Tuple[Union['Tensor', 'Parameter'], ...] = ()):
         if isinstance(data, (int, float)):
             data = np.array(data, dtype=np.float32)
@@ -20,12 +21,13 @@ class Tensor:
             raise ValueError('Invalid data type for Tensor.')
         
         self.data = data
-        self.grad = np.zeros_like(self.data)
         
         self.shape = self.data.shape
         self.ndim = self.data.ndim
         self.dtype = self.data.dtype
         
+        self.requires_grad = requires_grad
+        self.grad = np.zeros_like(data) if requires_grad else None
         self._prev = set(_children)
         self._backward = lambda: None  # function to compute local gradient updates
 
@@ -35,29 +37,23 @@ class Tensor:
         return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
     def __add__(self, other): # entry-wise addition
-        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
-                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
+        # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
+        other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
+
+        # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
+
+        # calc forward pass
+        other_data = other.data if self.shape == other.shape else np.broadcast_to(other.data, self.shape)
+        out = Tensor(self.data + other_data,
+                     requires_grad = (self.requires_grad or other.requires_grad),
+                     _children = (self, other))
         
-        if isinstance(other, (float, int)):
-            out = Tensor(self.data + other, (self,))
-            def _backward():
+        def _backward():
+            if self.requires_grad:
                 self.grad += out.grad
-            out._backward = _backward
             
-        if isinstance(other, (np.ndarray, Tensor)):
-            assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
-
-            # ensure other is of type Tensor in order to simplify later code
-            if not isinstance(other, Tensor): other = Tensor(other)
-                # if other does not start off as a tensor then the gradient that gets recorded here 
-                # will get ignored when the fwd pass inputs a fresh non-tensor every time
-
-            # calc forward pass
-            out = Tensor(self.data + other.data, (self, other)) if self.shape == other.shape else \
-                    Tensor(self.data + np.broadcast_to(other.data, self.shape), (self, other))
-            
-            def _backward():
-                self.grad += out.grad
+            if other.requires_grad:
                 if other.shape == self.shape:
                     other.grad += out.grad
                 else:
@@ -65,7 +61,7 @@ class Tensor:
                     axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
                     # sum over broadcasted dimensions since gradient must be reduced back to self's shape
                     other.grad += out.grad.sum(axis=axes).reshape(other.shape)
-            out._backward = _backward
+        out._backward = _backward
         
         return out
 
@@ -74,97 +70,76 @@ class Tensor:
         return self + other
 
     def __neg__(self):
-        out = Tensor(self.data * -1, (self,))
+        out = Tensor(self.data * -1, self.requires_grad, (self,))
         def _backward():
-            self.grad += -1 * out.grad
+            if self.requires_grad:
+                self.grad += -1 * out.grad
         out._backward = _backward
         return out
 
     def __sub__(self, other): 
         # so instead of writing its own we can just take advantage of __add__ and __neg__
-        return other + (-self)#self + (-other) 
+        return other + (-self)
 
     def __rsub__(self, other):
         return other + (-self)
 
     def __mul__(self, other): # entry-wise multiplication
-        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
-                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
+        # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
+        other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
+
+        # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
+
+        # calc forward pass
+        other_data = other.data if self.shape == other.shape else np.broadcast_to(other.data, self.shape)
+        out = Tensor(self.data * other_data,
+                     requires_grad = (self.requires_grad or other.requires_grad),
+                     _children = (self, other))
         
-        if isinstance(other, (float, int)):
-            out = Tensor(self.data * other, (self,))
-            def _backward():
-                self.grad += other * out.grad
-            out._backward = _backward
+        def _backward():
+            if self.requires_grad:
+                self.grad += out.grad * other.data
             
-        if isinstance(other, (np.ndarray, Tensor)):
-            assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
-            
-            # ensure other is of type Tensor in order to simplify later code
-            if not isinstance(other, Tensor): other = Tensor(other)
-                # if other does not start off as a tensor then the gradient that gets recorded here 
-                # will get ignored when the fwd pass inputs a fresh non-tensor every time
-            
-            # calc forward pass
-            out = Tensor(self.data * other.data, (self, other)) if self.shape == other.shape else \
-                    Tensor(self.data * np.broadcast_to(other.data, self.shape), (self, other))
-            
-            def _backward():
-                self.grad += other.data * out.grad
+            if other.requires_grad:
                 if other.shape == self.shape:
-                    other.grad += self.data * out.grad
+                    other.grad += out.grad * self.data
                 else:
                     # identify broadcasted dimensions
                     axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
                     # sum over broadcasted dimensions since gradient must be reduced back to self's shape
                     other.grad += (out.grad * self.data).sum(axis=axes).reshape(other.shape)
-            out._backward = _backward
-            
+        out._backward = _backward
+        
         return out
 
-    def __truediv__(self, other):
-        """
-        Perform element-wise division: self / other, with support for broadcasting of other
-        
-        Forward pass:
-          out = x / y
-        
-        Backward pass:
-          d/dx (x/y) = 1 / y
-          d/dy (x/y) = -x / (y^2)
-        """
-        assert isinstance(other, (float, int, np.ndarray, Tensor)),\
-                f'input must either be int, float, np.ndarray, or Tensor but is {type(other)}'
-        
-        if isinstance(other, (float, int)):
-            out = Tensor(self.data / other, (self,))
-            def _backward():
-                self.grad += out.grad / other
-            out._backward = _backward
-        
-        if isinstance(other, (np.ndarray, Tensor)):
-            # ensure other is of type Tensor in order to simplify later code
-            if not isinstance(other, Tensor): other = Tensor(other)
-                # if other does not start off as a tensor then the gradient that gets recorded here 
-                # will get ignored when the fwd pass inputs a fresh non-tensor every time
+    def __truediv__(self, other): # entry-wise division
+        '''TODO: make stable'''
+        # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
+        other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
-            # calc forward pass
-            out = Tensor(self.data / other.data, (self, other)) if self.shape == other.shape else \
-                    Tensor(self.data / np.broadcast_to(other.data, self.shape), (self, other))
-            
-            def _backward():
-                ### Compute gradients considering broadcasting
-                # local grad for self (the numerator): d/dx (x/y) = 1/y
+        # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
+
+        # calc forward pass
+        other_data = other.data if self.shape == other.shape else np.broadcast_to(other.data, self.shape)
+        out = Tensor(self.data / other_data,
+                     requires_grad = (self.requires_grad or other.requires_grad),
+                     _children = (self, other))
+        
+        def _backward():
+            if self.requires_grad:
                 self.grad += out.grad / other.data
-                # local grad for other (the denominator): d/dy (x/y) = -x / (y^2)
+            
+            if other.requires_grad:
                 if other.shape == self.shape:
-                    other.grad += (-self.data / (other.data ** 2)) * out.grad
+                    other.grad += out.grad * (-self.data / (other_data ** 2))
                 else:
                     # identify broadcasted dimensions
                     axes = tuple(i for i, (other_dim, out_dim) in enumerate(zip(other.shape, out.shape)) if other_dim != out_dim)
                     # sum over broadcasted dimensions since gradient must be reduced back to self's shape
-                    other.grad += (-self.data / (other.data ** 2) * out.grad).sum(axis=axes).reshape(other.shape)
-            out._backward = _backward
+                    other.grad += (out.grad * (-self.data / (other_data ** 2))).sum(axis=axes).reshape(other.shape)
+        out._backward = _backward
         
         return out
 
@@ -172,16 +147,17 @@ class Tensor:
         return self / other
         
     def sum(self, dim: int = -1):
-        out = Tensor(np.sum(self.data, axis = dim), (self,))
+        out = Tensor(np.sum(self.data, axis = dim), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.broadcast_to(out.grad, self.shape)
+            if self.requires_grad:
+                self.grad += np.broadcast_to(out.grad, self.shape)
         out._backward = _backward
         return out
         
     def __matmul__(self, other):
-        assert isinstance(other, (list, np.ndarray, Tensor)), \
-            f"x2 must be list, np.ndarray, Tensor"
-        if not isinstance(other, Tensor): other = Tensor(other)
+        # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
+        other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
+        
         assert self.ndim >= 2 and other.ndim >= 2, \
             f'Both tensors must have at least 2 dimensions for matrix multiplication: Got x1:{self.ndim}, x2:{other.ndim}'
         assert self.shape[-1] == other.shape[-2], \
@@ -190,46 +166,65 @@ class Tensor:
             f"Preceding dimensions must either match exactly or be absent. Got x1:{self.shape[:-2]}, x2:{other.shape[:-2]}"
 
         # calc forward pass
-        out = Tensor(self.data @ other.data, (self, other)) # (..., m, n) @ (..., n, p) -> (..., m, p)
+        out = Tensor(self.data @ other.data, # (..., m, n) @ (..., n, p) -> (..., m, p)
+                     requires_grad = (self.requires_grad or other.requires_grad),
+                     _children = (self, other)) 
         
         def _backward():
-            self.grad += out.grad @ other.data.transpose() # (..., m, p)   @ (..., n, p).T -> (..., m, p) @ (..., p, n) -> (..., m, n)
-            other.grad += self.data.transpose() @ out.grad # (..., m, n).T @ (..., m, p)   -> (..., n, m) @ (..., m, p) -> (..., n, p)
+            if self.requires_grad:
+                self.grad += out.grad @ other.data.transpose() # (..., m, p)   @ (..., n, p).T -> (..., m, p) @ (..., p, n) -> (..., m, n)
+            if other.requires_grad:
+                other.grad += self.data.transpose() @ out.grad # (..., m, n).T @ (..., m, p)   -> (..., n, m) @ (..., m, p) -> (..., n, p)
         out._backward = _backward
         
         return out
 
     def exp(self):
-        out = Tensor(np.exp(self.data), (self,))
+        out = Tensor(np.exp(self.data), self.requires_grad, (self,))
         def _backward():
-            self.grad += out.data * out.grad # derivative of e^x is just e^x, therefore out.data
+            if self.requires_grad:
+                self.grad += out.data * out.grad # derivative of e^x is just e^x, therefore out.data
         out._backward = _backward
         return out
 
     def log(self):
+        '''TODO: make stable?'''
         assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logaritm'
-        out = Tensor(np.log(self.data), (self,))
+        out = Tensor(np.log(self.data), self.requires_grad, (self,))
         def _backward(): # local gradient: d/dx (ln(x)) = 1/x
-            self.grad += out.grad  / self.data
+            if self.requires_grad:
+                self.grad += out.grad  / self.data
         out._backward = _backward
         return out
 
     def relu(self):
-        out = Tensor(np.maximum(0, self.data), (self,))
+        out = Tensor(np.maximum(0, self.data), self.requires_grad, (self,))
         def _backward():
-            self.grad += (out.data > 0) * out.grad
+            if self.requires_grad:
+                self.grad += (out.data > 0) * out.grad
         out._backward = _backward
         return out
 
     def max(self, axis = None):
+        '''
+        TODO: 
+        - [ ] add gradient calc
+        - [ ] add indices as output
+        '''
         assert not axis or isinstance(axis, int)
         return np.max(self.data) if axis is None else np.max(self.data, axis=axis)
 
     def min(self, axis = None):
+        '''
+        TODO: 
+        - [ ] add gradient calc
+        - [ ] add indices as output
+        '''
         assert not axis or isinstance(axis, int)
         return np.min(self.data) if axis is None else np.min(self.data, axis=axis)
 
     def softmax(self, dim: int = -1):
+        '''TODO: adjust once gradient calc has been added to max'''
         # to make make softmax stable (avoid numerical overflow during .exp()) we subtract by the maximum values)
         maximums = np.max(self.data, axis=dim)
         print(maximums)
@@ -248,32 +243,36 @@ class Tensor:
         entry-wise exponentiation that supports integer powers
         '''
         assert isinstance(pow, (int, float)), f'power must be int or float but got {type(pow)}'
-        out = Tensor(self.data ** pow, (self,))
+        out = Tensor(self.data ** pow, self.requires_grad, (self,))
         def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
-            self.grad += out.grad * pow * self.data ** (pow - 1)
+            if self.requires_grad:
+                self.grad += out.grad * pow * self.data ** (pow - 1)
         out._backward = _backward
         return out
 
     def transpose(self, axes: tuple = None):
         if axes is None: # defaults to transposing final two dims
             axes = tuple(dim for dim in range(self.ndim - 2)) + (self.ndim - 1, self.ndim - 2)
-        out = Tensor(np.transpose(self.data, axes=axes), (self,))
+        out = Tensor(np.transpose(self.data, axes=axes), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.transpose(out.grad, axes=axes)
+            if self.requires_grad:
+                self.grad += np.transpose(out.grad, axes=axes)
         out._backward = _backward
         return out
 
     def squeeze(self, dim):
-        out = Tensor(np.squeeze(self.data, axis=dim), (self,))
+        out = Tensor(np.squeeze(self.data, axis=dim), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.expand_dims(out.grad, axis=dim)
+            if self.requires_grad:
+                self.grad += np.expand_dims(out.grad, axis=dim)
         out._backward = _backward
         return out
         
     def unsqueeze(self, dim):
-        out = Tensor(np.expand_dims(self.data, axis=dim), (self,))
+        out = Tensor(np.expand_dims(self.data, axis=dim), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.squeeze(out.grad, axis=dim)
+            if self.requires_grad:
+                self.grad += np.squeeze(out.grad, axis=dim)
         out._backward = _backward
         return out
 
@@ -283,30 +282,41 @@ class Tensor:
             if self.shape[i] != shape[i]:
                 dim = i
         assert self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[dim]}"
-        out = Tensor(np.broadcast_to(self.data, shape), (self,))
+        out = Tensor(np.broadcast_to(self.data, shape), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.sum(out.grad, axis=dim)
+            if self.requires_grad:
+                self.grad += np.sum(out.grad, axis=dim)
         out._backward = _backward
         return out
 
     def reshape(self, shape: tuple):
-        out = Tensor(np.reshape(self.data, shape), (self,))
+        out = Tensor(np.reshape(self.data, shape), self.requires_grad, (self,))
         def _backward():
-            self.grad += np.reshape(out.grad, self.shape)
+            if self.requires_grad:
+                self.grad += np.reshape(out.grad, self.shape)
         out._backward = _backward
         return out
 
     def __getitem__(self, idx):
         # numpy handles the actual indexing behavior for us
         sliced_data = self.data[idx]
-        out = Tensor(sliced_data, (self,))
+        out = Tensor(sliced_data, self.requires_grad, (self,))
         def _backward():
-            # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
-            np.add.at(self.grad, idx, out.grad)
+            if self.requires_grad:
+                # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
+                np.add.at(self.grad, idx, out.grad)
         out._backward = _backward
         return out
 
+    def zero_grad(self):
+        if self.requires_grad:
+            self.grad = np.zeros_like(self.data)
+
     def backward(self):
+        """
+        Run backpropagation starting from this tensor. 
+        Typically called on a scalar loss Tensor.
+        """
         topo = []
         visited = set()
         def build_topo(v):
@@ -320,3 +330,41 @@ class Tensor:
         for node in reversed(topo):
             node._backward()
 
+
+class Parameter(Tensor):
+    """
+    A Parameter is a special kind of Tensor that is meant to be trainable.
+    Typically used for model weights and biases in neural network layers.
+    By default, Parameters require gradients.
+    """
+    def __init__(self, data: Union[float, int, np.ndarray]):
+        super().__init__(data, requires_grad=True)
+
+    def __repr__(self):
+        return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
+
+
+if __name__ == "__main__":
+    print('-------- same shape --------')
+    x = Tensor([[1,2],[3,4]])
+    print(x)
+    w = Parameter([[0.1,-0.2],[-0.1,0.1]])
+    print(w)
+    y = x / w
+    print(y)
+    y.backward()
+    print(y)
+    print(w)
+    print(x)
+
+    print('-------- broadcasted --------')
+    x = Tensor([[1,2],[3,4]])
+    print(x)
+    w = Parameter([[0.1,-0.2]])
+    print(w)
+    y = x / w
+    print(y)
+    y.backward()
+    print(y)
+    print(w)
+    print(x)
