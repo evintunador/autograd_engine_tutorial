@@ -1,7 +1,6 @@
 import numpy as np
 
 from typing import Tuple, Union
-Arrayable = Union[float, int, np.ndarray, 'Tensor', 'Parameter']
 
 class Tensor:
     '''Stores a tensor and its gradient information'''
@@ -206,22 +205,61 @@ class Tensor:
         return out
 
     def max(self, axis = None):
-        '''
-        TODO: 
-        - [ ] add gradient calc
-        - [ ] add indices as output
-        '''
-        assert not axis or isinstance(axis, int)
-        return np.max(self.data) if axis is None else np.max(self.data, axis=axis)
+        assert not axis or isinstance(axis, int), "axis must be None or an integer"
+
+        # grab indices of the maximum values
+        idx = np.argmax(self.data, axis)
+        if axis is None: # returs the un-flattened index
+            idx = np.unravel_index(idx, self.shape)
+
+        # calc fwd pass
+        maximums = Tensor(np.max(self.data, axis), self.requires_grad, (self,))
+        
+        def _backward():
+            if self.requires_grad:
+                if axis is None:
+                    # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
+                    np.add.at(self.grad, idx, maximums.grad)
+                else:
+                    # self.shape = (d0, d1, ..., dN)
+                    # If axis = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
+                    # Create a range array for all axes except the reduced one
+                    coords = [np.arange(dim) for ax, dim in enumerate(self.shape) if ax != axis]
+                
+                    # Now use meshgrid to create full coordinate arrays
+                    grids = np.meshgrid(*coords, indexing='ij') # https://www.geeksforgeeks.org/numpy-meshgrid-function/
+                
+                    # We need to interleave 'idx' into these at the correct position.
+                    final_indices = grids[:axis] + [idx] + grids[axis:]
+                            
+                    # Now apply np.add.at to get our gradients into the correct place
+                    np.add.at(self.grad, tuple(final_indices), maximums.grad)
+        maximums._backward = _backward
+        
+        return maximums, idx
 
     def min(self, axis = None):
-        '''
-        TODO: 
-        - [ ] add gradient calc
-        - [ ] add indices as output
-        '''
-        assert not axis or isinstance(axis, int)
-        return np.min(self.data) if axis is None else np.min(self.data, axis=axis)
+        assert not axis or isinstance(axis, int), "axis must be None or an integer"
+
+        # grab indices of the maximum values
+        idx = np.argmin(self.data, axis)
+        if axis is None:
+            idx = np.unravel_index(idx, self.shape)
+
+        # calc fwd pass
+        minimums = Tensor(np.min(self.data, axis), self.requires_grad, (self,))
+        
+        def _backward():
+            if self.requires_grad:
+                #minimums_grad = minimums.grad if axis is None else np.expand_dims(minimums.grad, axis)
+                #self.grad += np.broadcast_to(minimums_grad, self.shape)
+                
+                # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
+                print(idx)
+                np.add.at(self.grad, idx, maximums.grad)
+        minimums._backward = _backward
+        
+        return minimums, idx
 
     def softmax(self, dim: int = -1):
         '''TODO: adjust once gradient calc has been added to max'''
@@ -345,7 +383,7 @@ class Parameter(Tensor):
 
 
 if __name__ == "__main__":
-    print('-------- same shape --------')
+    print('-------- test add/mul/truediv same shape --------')
     x = Tensor([[1,2],[3,4]])
     print(x)
     w = Parameter([[0.1,-0.2],[-0.1,0.1]])
@@ -357,7 +395,7 @@ if __name__ == "__main__":
     print(w)
     print(x)
 
-    print('-------- broadcasted --------')
+    print('-------- test add/mul/truediv broadcasted --------')
     x = Tensor([[1,2],[3,4]])
     print(x)
     w = Parameter([[0.1,-0.2]])
@@ -368,3 +406,19 @@ if __name__ == "__main__":
     print(y)
     print(w)
     print(x)
+
+    print('------------------------ test min/max ------------------------')
+    print('-------- single entry --------')
+    a = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
+    print(a)
+    m = a.max()[0]
+    m.backward()
+    print(m)
+    print(a)
+    print('-------- along a specific dim --------')
+    b = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
+    print(b)
+    m = b.max(1)[0]
+    m.backward()
+    print(m)
+    print(b)
