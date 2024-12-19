@@ -113,7 +113,6 @@ class Tensor:
         return out
 
     def __truediv__(self, other): # entry-wise division
-        '''TODO: make stable'''
         # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
@@ -121,7 +120,9 @@ class Tensor:
         assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
         # calc forward pass
-        other_data = other.data if self.shape == other.shape else np.broadcast_to(other.data, self.shape)
+        eps = 1e-7 if self.data.dtype == np.float32 else 1e-16  # Adjust epsilon based on precision
+        other_data = other.data + eps # for stability; wouldn't want to divide by 0
+        other_data = other_data if self.shape == other.shape else np.broadcast_to(other_data, self.shape)
         out = Tensor(self.data / other_data,
                      requires_grad = (self.requires_grad or other.requires_grad),
                      _children = (self, other))
@@ -189,7 +190,9 @@ class Tensor:
     def log(self):
         '''TODO: make stable?'''
         assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logaritm'
-        out = Tensor(np.log(self.data), self.requires_grad, (self,))
+        eps = 1e-7 if self.data.dtype == np.float32 else 1e-16  # Adjust epsilon based on precision
+        stabilized_data = np.clip(self.data, eps, None)  # Clip values to [eps, ∞)
+        out = Tensor(np.log(stabilized_data), self.requires_grad, (self,))
         def _backward(): # local gradient: d/dx (ln(x)) = 1/x
             if self.requires_grad:
                 self.grad += out.grad  / self.data
