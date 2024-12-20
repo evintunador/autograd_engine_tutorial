@@ -2,11 +2,28 @@ import numpy as np
 from engine import Tensor, Parameter
 
 class Module: # just to make our syntax the same as pytorch's
+    def __init__(self):
+        self.training = True
+
     def zero_grad(self):
         for p in self.parameters():
             p.zero_grad()
 
     def parameters(self):
+        return []
+
+    def train(self, mode=True):
+        self.training = mode
+        for m in self.children():
+            m.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def children(self):
+        # returns a list or iterator of immediate children modules
+        # this will be useful for recursively setting training mode
         return []
 
 class Linear(Module):
@@ -42,6 +59,25 @@ class Embedding(Module):
     def parameters(self):
         return [self.w]
 
+class Dropout(Module):
+    def __init__(self, p: float = 0.5):
+        super().__init__()
+        self.p = p
+
+    def __call__(self, x: Tensor):
+        if not self.training:
+            return x
+        
+        # create a mask of the same shape as x
+        # with probability (1 - p) for each element to be 1, and p to be 0
+        mask = np.random.binomial(1, 1 - self.p, size=x.shape) / (1 - self.p)
+        mask = Tensor(mask, requires_grad=False) # mask doesn't need grad
+
+        return x * mask
+
+    def __repr__(self):
+        return f"Dropout(p={self.p})"
+
 if __name__ == "__main__":
     b = 2
     d = 4
@@ -71,4 +107,19 @@ if __name__ == "__main__":
     print(toks)
     print(E)
     print(x)
+    
+    print("---------------- test dropout ----------------")
+    input_tensor = Tensor(np.random.randn(2, 3, 4))
+    dropout = Dropout(p=0.5)
+    print("----- training mode -----")
+    dropout.train()
+    output_train = dropout(input_tensor)
+    print("Input:", input_tensor.data)
+    print("Output (Train):", output_train.data)
+
+    print("----- evaluation mode -----")
+    dropout.eval()
+    output_eval = dropout(input_tensor)
+    print("Input:", input_tensor.data)
+    print("Output (Eval):", output_eval.data)
     
