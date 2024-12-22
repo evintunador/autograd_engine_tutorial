@@ -60,7 +60,7 @@ class Embedding(Module):
         return [self.w]
 
 class Dropout(Module):
-    def __init__(self, p: float = 0.5):
+    def __init__(self, p: float = 0.1):
         super().__init__()
         self.p = p
 
@@ -77,6 +77,41 @@ class Dropout(Module):
 
     def __repr__(self):
         return f"Dropout(p={self.p})"
+
+    def parameters(self): # do i need this function on every Module? or just the ones with parametes?
+        return []
+    
+class LayerNorm(Module):
+    def __init__(self, dim: int, elementwise_affine: bool = True, bias: bool = True):
+        self.dim = dim
+        self.eps = 1e-5
+
+        if elementwise_affine: 
+            self.affine = Parameter(np.random.normal(scale=0.02, size=dim).astype(np.float32))
+            if bias: # bias will only be created if elementwise_affine is also created
+                self.bias = Parameter(np.zeros(dim).astype(np.float32))
+
+    def __call__(self, x):
+        assert self.dim == x.shape[-1]
+        # normalize
+        mean = x.mean()
+        var = x.var()
+        out = (x - mean) / (var + self.eps) ** 0.5
+        # affine transformation
+        if self.affine:
+            out = out * self.affine
+            if self.bias:
+                out = out + self.bias
+        return out
+
+    def __repr__(self):
+        if self.bias:
+            return f"Layerorm:\nElement-wise affie:\n({self.affine})\nBias:\n({self.bias})"  
+        else:
+            return f"Layerorm:\nElement-wise affie:\n({self.affine})"
+
+    def parameters(self):
+        return [self.affine, self.bias]
 
 if __name__ == "__main__":
     b = 2
@@ -122,4 +157,12 @@ if __name__ == "__main__":
     output_eval = dropout(input_tensor)
     print("Input:", input_tensor.data)
     print("Output (Eval):", output_eval.data)
+
+    print("---------------- test dropout ----------------")
+    x = Tensor(np.random.randn(2, 3, 4))
+    print(x)
+    ln = LayerNorm(x.shape[-1])
+    print(ln)
+    y = ln(x)
+    print(y)
     

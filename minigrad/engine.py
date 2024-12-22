@@ -9,7 +9,7 @@ class Tensor:
                  requires_grad: bool = False, 
                  _children: Tuple[Union['Tensor', 'Parameter'], ...] = ()):
         if isinstance(data, (int, float)):
-            data = np.array(data, dtype=np.float32)
+            data = np.array([data], dtype=np.float32)
         elif isinstance(data, list):
             data = np.array(data, dtype=np.float32)
         elif isinstance(data, np.ndarray):
@@ -78,7 +78,7 @@ class Tensor:
 
     def __sub__(self, other): 
         # so instead of writing its own we can just take advantage of __add__ and __neg__
-        return other + (-self)
+        return self + (-other)
 
     def __rsub__(self, other):
         return other + (-self)
@@ -144,15 +144,7 @@ class Tensor:
         return out
 
     def __rtruediv__(self, other):
-        return self / other
-        
-    def sum(self, dim: int = -1):
-        out = Tensor(np.sum(self.data, axis = dim), self.requires_grad, (self,))
-        def _backward():
-            if self.requires_grad:
-                self.grad += np.broadcast_to(out.grad, self.shape)
-        out._backward = _backward
-        return out
+        return Tensor(other) / self
         
     def __matmul__(self, other):
         # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
@@ -178,6 +170,18 @@ class Tensor:
         out._backward = _backward
         
         return out
+        
+    def sum(self, dim: int = -1):
+        out = Tensor(np.sum(self.data, axis = dim), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += np.broadcast_to(out.grad, self.shape)
+        out._backward = _backward
+        return out
+    
+    def mean(self, dim: int = -1):
+        # i don't think i need a _backward because sum and truediv already implement them into out
+        return self.sum(dim) / self.shape[dim]
 
     def exp(self):
         out = Tensor(np.exp(self.data), self.requires_grad, (self,))
@@ -188,7 +192,6 @@ class Tensor:
         return out
 
     def log(self):
-        '''TODO: make stable?'''
         assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logaritm'
         eps = 1e-7 if self.data.dtype == np.float32 else 1e-16  # Adjust epsilon based on precision
         stabilized_data = np.clip(self.data, eps, None)  # Clip values to [eps, ∞)
@@ -214,6 +217,11 @@ class Tensor:
         idx = np.argmax(self.data, axis)
         if axis is None: # returs the un-flattened index
             idx = np.unravel_index(idx, self.shape)
+        
+        # normalize axis to ensure the final_indices calculation below works
+        if axis is not None and axis < 0:
+            # Convert negative axes to positive
+            axis += self.ndim  # e.g. -1 => +2 for a 3D tensor
 
         # calc fwd pass
         maximums = Tensor(np.max(self.data, axis), self.requires_grad, (self,))
@@ -221,8 +229,7 @@ class Tensor:
         def _backward():
             if self.requires_grad:
                 if axis is None:
-                    # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
-                    np.add.at(self.grad, idx, maximums.grad)
+                    self.grad[idx] += maximums.grad[0]
                 else:
                     # self.shape = (d0, d1, ..., dN)
                     # If axis = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
@@ -230,11 +237,12 @@ class Tensor:
                     coords = [np.arange(dim) for ax, dim in enumerate(self.shape) if ax != axis]
                 
                     # Now use meshgrid to create full coordinate arrays
-                    grids = np.meshgrid(*coords, indexing='ij') # https://www.geeksforgeeks.org/numpy-meshgrid-function/
-                
+                    grids = list(np.meshgrid(*coords, indexing='ij')) 
+                        # https://www.geeksforgeeks.org/numpy-meshgrid-function/
+
                     # We need to interleave 'idx' into these at the correct position.
                     final_indices = grids[:axis] + [idx] + grids[axis:]
-                            
+
                     # Now apply np.add.at to get our gradients into the correct place
                     np.add.at(self.grad, tuple(final_indices), maximums.grad)
         maximums._backward = _backward
@@ -248,35 +256,45 @@ class Tensor:
         idx = np.argmin(self.data, axis)
         if axis is None:
             idx = np.unravel_index(idx, self.shape)
+        
+        # normalize axis to ensure the final_indices calculation below works
+        if axis is not None and axis < 0:
+            # Convert negative axes to positive
+            axis += self.ndim  # e.g. -1 => +2 for a 3D tensor
 
         # calc fwd pass
         minimums = Tensor(np.min(self.data, axis), self.requires_grad, (self,))
         
         def _backward():
             if self.requires_grad:
-                #minimums_grad = minimums.grad if axis is None else np.expand_dims(minimums.grad, axis)
-                #self.grad += np.broadcast_to(minimums_grad, self.shape)
+                if axis is None:
+                    self.grad[idx] += minimums.grad[0]
+                else:
+                    # self.shape = (d0, d1, ..., dN)
+                    # If axis = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
+                    # Create a range array for all axes except the reduced one
+                    coords = [np.arange(dim) for ax, dim in enumerate(self.shape) if ax != axis]
                 
-                # np.add.at() correctly distributes the gradient from the sliced tensor back to the original tensor
-                print(idx)
-                np.add.at(self.grad, idx, maximums.grad)
+                    # Now use meshgrid to create full coordinate arrays
+                    grids = list(np.meshgrid(*coords, indexing='ij')) 
+                        # https://www.geeksforgeeks.org/numpy-meshgrid-function/
+                
+                    # We need to interleave 'idx' into these at the correct position.
+                    final_indices = grids[:axis] + [idx] + grids[axis:]
+                            
+                    # Now apply np.add.at to get our gradients into the correct place
+                    np.add.at(self.grad, tuple(final_indices), minimums.grad)
         minimums._backward = _backward
         
         return minimums, idx
 
     def softmax(self, dim: int = -1):
-        '''TODO: adjust once gradient calc has been added to max'''
-        # to make make softmax stable (avoid numerical overflow during .exp()) we subtract by the maximum values)
-        maximums = np.max(self.data, axis=dim)
-        print(maximums)
-        self.data -= np.broadcast_to(np.expand_dims(maximums, axis=dim), self.shape)
-        # subtraction of max doesn't have to worry about gradient since local grad of addition is 1
-        # the following ops have their gradient calculated by all the Tensor methods that we call
-        print(self)
-        exps = self.exp()
-        sum_exps = exps.sum(dim=dim).unsqueeze(dim).broadcast_to(self.shape)
-        print(exps)
-        print(sum_exps)
+        # Stabilize (avoid numerical overflow) by subtracting max
+        maximums = self.max(axis=dim)[0]
+        stable_self = self - maximums.unsqueeze(dim)
+        # calculate softmax
+        exps = stable_self.exp()
+        sum_exps = exps.sum(dim=dim).unsqueeze(dim)#.broadcast_to(self.shape)
         return exps / sum_exps
 
     def __pow__(self, pow: int):
@@ -290,6 +308,12 @@ class Tensor:
                 self.grad += out.grad * pow * self.data ** (pow - 1)
         out._backward = _backward
         return out
+    
+    def var(self, dim: int = -1):
+        return ((self - self.mean(dim)) ** 2).sum(dim) / self.shape[dim]
+    
+    def sd(self, dim: int = -1):
+        return self.var(dim) ** 0.5
 
     def transpose(self, axes: tuple = None):
         if axes is None: # defaults to transposing final two dims
@@ -415,6 +439,7 @@ if __name__ == "__main__":
     a = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
     print(a)
     m = a.max()[0]
+    print(m)
     m.backward()
     print(m)
     print(a)
@@ -422,6 +447,25 @@ if __name__ == "__main__":
     b = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
     print(b)
     m = b.max(1)[0]
+    print(m)
+    m.backward()
+    print(m)
+    print(b)
+
+    print('------------------------ test softmax ------------------------')
+    print('-------- single entry --------')
+    a = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
+    print(a)
+    m = a.softmax()
+    print(m)
+    m.backward()
+    print(m)
+    print(a)
+    print('-------- along a specific dim --------')
+    b = Tensor(np.array([[[1.,2],[3,4]],[[5,6],[7,8]]]), requires_grad=True)
+    print(b)
+    m = b.softmax(1)
+    print(m)
     m.backward()
     print(m)
     print(b)
