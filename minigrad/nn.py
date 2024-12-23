@@ -34,9 +34,8 @@ class Linear(Module):
         if bias: self.b = Parameter(np.zeros((1,out_dim)).astype(np.float32))
 
     def __call__(self, x: Tensor):
-        while x.ndim > self.w.ndim:
-            self.w.unsqueeze(0)
-            self.b.unsqueeze(0)
+        while x.ndim > self.b.ndim:
+            self.b = self.b.unsqueeze(0)
         return x @ self.w + self.b if self.b else x @ self.w
 
     def __repr__(self):
