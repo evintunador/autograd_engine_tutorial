@@ -40,6 +40,9 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
         # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        if (other.ndim == 1 and other.shape[0] == 1) or other.shape[-other.ndim:] == self.shape[-other.ndim:]:
+            while other.ndim < self.ndim:
+                other = other.unsqueeze(0)
         assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
         # calc forward pass
@@ -88,6 +91,9 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
         # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        if (other.ndim == 1 and other.shape[0] == 1) or other.shape[-other.ndim:] == self.shape[-other.ndim:]:
+            while other.ndim < self.ndim:
+                other = other.unsqueeze(0)
         assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
         # calc forward pass
@@ -117,6 +123,9 @@ class Tensor:
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
         # do i need this? if yes then it'll require we use .unsqueeze() before inputting here
+        if (other.ndim == 1 and other.shape[0] == 1) or other.shape[-other.ndim:] == self.shape[-other.ndim:]:
+            while other.ndim < self.ndim:
+                other = other.unsqueeze(0)
         assert self.ndim == other.ndim, f'tensor ndim mismatch x1: {self.shape} x2: {other.shape}'
 
         # calc forward pass
@@ -209,39 +218,42 @@ class Tensor:
                 self.grad += (out.data > 0) * out.grad
         out._backward = _backward
         return out
+    
+    def _normalize_dim(self, dim: int):
+        # normalize dim to ensure that calculations which don't like negative numbers work
+        if dim is not None and dim < 0:
+            # Convert negative axes to positive
+            dim += self.ndim  # e.g. -1 => +2 for a 3D tensor
+        return dim
 
-    def max(self, axis = None):
-        assert not axis or isinstance(axis, int), "axis must be None or an integer"
+    def max(self, dim = None):
+        assert not dim or isinstance(dim, int), "dim must be None or an integer"
+        dim = self._normalize_dim(dim)
 
         # grab indices of the maximum values
-        idx = np.argmax(self.data, axis)
-        if axis is None: # returs the un-flattened index
+        idx = np.argmax(self.data, dim)
+        if dim is None: # returs the un-flattened index
             idx = np.unravel_index(idx, self.shape)
-        
-        # normalize axis to ensure the final_indices calculation below works
-        if axis is not None and axis < 0:
-            # Convert negative axes to positive
-            axis += self.ndim  # e.g. -1 => +2 for a 3D tensor
 
         # calc fwd pass
-        maximums = Tensor(np.max(self.data, axis), self.requires_grad, (self,))
+        maximums = Tensor(np.max(self.data, dim), self.requires_grad, (self,))
         
         def _backward():
             if self.requires_grad:
-                if axis is None:
+                if dim is None:
                     self.grad[idx] += maximums.grad[0]
                 else:
                     # self.shape = (d0, d1, ..., dN)
-                    # If axis = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
+                    # If dim = k then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
                     # Create a range array for all axes except the reduced one
-                    coords = [np.arange(dim) for ax, dim in enumerate(self.shape) if ax != axis]
+                    coords = [np.arange(d) for i, d in enumerate(self.shape) if i != dim]
                 
                     # Now use meshgrid to create full coordinate arrays
                     grids = list(np.meshgrid(*coords, indexing='ij')) 
                         # https://www.geeksforgeeks.org/numpy-meshgrid-function/
 
                     # We need to interleave 'idx' into these at the correct position.
-                    final_indices = grids[:axis] + [idx] + grids[axis:]
+                    final_indices = grids[:dim] + [idx] + grids[dim:]
 
                     # Now apply np.add.at to get our gradients into the correct place
                     np.add.at(self.grad, tuple(final_indices), maximums.grad)
@@ -249,38 +261,34 @@ class Tensor:
         
         return maximums, idx
 
-    def min(self, axis = None):
-        assert not axis or isinstance(axis, int), "axis must be None or an integer"
+    def min(self, dim = None):
+        assert not dim or isinstance(dim, int), "dim must be None or an integer"
+        dim = self._normalize_dim(dim)
 
         # grab indices of the maximum values
-        idx = np.argmin(self.data, axis)
-        if axis is None:
+        idx = np.argmin(self.data, dim)
+        if dim is None:
             idx = np.unravel_index(idx, self.shape)
-        
-        # normalize axis to ensure the final_indices calculation below works
-        if axis is not None and axis < 0:
-            # Convert negative axes to positive
-            axis += self.ndim  # e.g. -1 => +2 for a 3D tensor
 
         # calc fwd pass
-        minimums = Tensor(np.min(self.data, axis), self.requires_grad, (self,))
+        minimums = Tensor(np.min(self.data, dim), self.requires_grad, (self,))
         
         def _backward():
             if self.requires_grad:
-                if axis is None:
+                if dim is None:
                     self.grad[idx] += minimums.grad[0]
                 else:
                     # self.shape = (d0, d1, ..., dN)
-                    # If axis = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
+                    # If dim = k, then 'reduced_shape' = maximums.shape = (d0, ... d_{k-1}, d_{k+1}, ... dN)
                     # Create a range array for all axes except the reduced one
-                    coords = [np.arange(dim) for ax, dim in enumerate(self.shape) if ax != axis]
+                    coords = [np.arange(d) for i, d in enumerate(self.shape) if i != dim]
                 
                     # Now use meshgrid to create full coordinate arrays
                     grids = list(np.meshgrid(*coords, indexing='ij')) 
                         # https://www.geeksforgeeks.org/numpy-meshgrid-function/
                 
                     # We need to interleave 'idx' into these at the correct position.
-                    final_indices = grids[:axis] + [idx] + grids[axis:]
+                    final_indices = grids[:dim] + [idx] + grids[dim:]
                             
                     # Now apply np.add.at to get our gradients into the correct place
                     np.add.at(self.grad, tuple(final_indices), minimums.grad)
@@ -290,7 +298,7 @@ class Tensor:
 
     def softmax(self, dim: int = -1):
         # Stabilize (avoid numerical overflow) by subtracting max
-        maximums = self.max(axis=dim)[0]
+        maximums = self.max(dim)[0]
         stable_self = self - maximums.unsqueeze(dim)
         # calculate softmax
         exps = stable_self.exp()
@@ -298,9 +306,7 @@ class Tensor:
         return exps / sum_exps
 
     def __pow__(self, pow: int):
-        '''
-        entry-wise exponentiation that supports integer powers
-        '''
+        '''entry-wise exponentiation that supports integer powers'''
         assert isinstance(pow, (int, float)), f'power must be int or float but got {type(pow)}'
         out = Tensor(self.data ** pow, self.requires_grad, (self,))
         def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
@@ -310,7 +316,7 @@ class Tensor:
         return out
     
     def var(self, dim: int = -1):
-        return ((self - self.mean(dim)) ** 2).sum(dim) / self.shape[dim]
+        return ((self - self.mean(dim).unsqueeze(dim)) ** 2).sum(dim) / self.shape[dim]
     
     def sd(self, dim: int = -1):
         return self.var(dim) ** 0.5

@@ -94,8 +94,8 @@ class LayerNorm(Module):
     def __call__(self, x):
         assert self.dim == x.shape[-1]
         # normalize
-        mean = x.mean()
-        var = x.var()
+        mean = x.mean().unsqueeze(-1)
+        var = x.var().unsqueeze(-1)
         out = (x - mean) / (var + self.eps) ** 0.5
         # affine transformation
         if self.affine:
@@ -105,10 +105,13 @@ class LayerNorm(Module):
         return out
 
     def __repr__(self):
-        if self.bias:
-            return f"Layerorm:\nElement-wise affie:\n({self.affine})\nBias:\n({self.bias})"  
+        if self.affine:
+            if self.bias:
+                return f"LayerNorm:\nElement-wise affie:\n({self.affine})\nBias:\n({self.bias})"  
+            else:
+                return f"LayerNorm:\nElement-wise affie:\n({self.affine})"
         else:
-            return f"Layerorm:\nElement-wise affie:\n({self.affine})"
+            return "LayerNorm"
 
     def parameters(self):
         return [self.affine, self.bias]
@@ -158,11 +161,12 @@ if __name__ == "__main__":
     print("Input:", input_tensor.data)
     print("Output (Eval):", output_eval.data)
 
-    print("---------------- test dropout ----------------")
+    print("---------------- test layernorm ----------------")
     x = Tensor(np.random.randn(2, 3, 4))
     print(x)
     ln = LayerNorm(x.shape[-1])
     print(ln)
     y = ln(x)
     print(y)
+    print(x)
     
