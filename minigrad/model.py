@@ -2,29 +2,13 @@ import numpy as np
 
 from engine import Tensor, Parameter
 import nn
-
-class MultiLayerPerceptron(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
-        super().__init__()
-        self.up = nn.Linear(input_dim, hidden_dim)
-        self.down = nn.Linear(hidden_dim, output_dim)
-
-    def __call__(self, x):
-        return self.down(self.up(x).relu())
-    
-    def children(self):
-        return [self.up, self.down]
-
-    def __repr__(self):
-        return f"MLP of\nUp Projection: ({self.up.w.shape})\nDown Projection: ({self.down.w.shape})"
     
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, model_dim, num_heads, head_dim, max_seq_len, dropout_rate, mask):
+    def __init__(self, model_dim, num_heads, head_dim, dropout_rate, mask):
         super().__init__()
         self.model_dim = model_dim # referred to as "d" in shapes
         self.num_heads = num_heads # referred to as "nh" in shapes
         self.head_dim = head_dim # referred to as "hd" in shapes
-        self.max_seq_len = max_seq_len
         
         self.Wq = nn.Linear(model_dim, num_heads * head_dim)
         self.Wk = nn.Linear(model_dim, num_heads * head_dim)
@@ -89,6 +73,40 @@ class MultiHeadSelfAttention(nn.Module):
         # before returning, dropout IF we're training
         return self.drop2(out)
 
+class MultiLayerPerceptron(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.up = nn.Linear(input_dim, hidden_dim)
+        self.down = nn.Linear(hidden_dim, output_dim)
+
+    def __call__(self, x):
+        return self.down(self.up(x).relu())
+    
+    def children(self):
+        return [self.up, self.down]
+
+    def __repr__(self):
+        return f"MLP of\nUp Projection: ({self.up.w.shape})\nDown Projection: ({self.down.w.shape})"
+    
+class ResidualLayer(nn.Module):
+    def __init__(self, model_dim, num_heads, head_dim, dropout_rate, mask, mlp_mult):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(model_dim)
+        self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, dropout_rate, mask)
+        self.ln2 = nn.LayerNorm(model_dim)
+        self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
+    
+    def children(self):
+        return [self.ln1, self.mhsa, self.ln2, self.mlp]
+
+    def __repr__(self):
+        return f"Residual Layer of:\n{self.ln1}\n{self.mhsa}\n{self.ln2}\n{self.mlp}"
+
+    def __call__(self, x):
+        x = x + self.mhsa(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
+        return x
+
 if __name__ == "__main__":
     b = 2
     dim = 8
@@ -109,7 +127,15 @@ if __name__ == "__main__":
     print("---------------- test mhsa ----------------")
     x = Tensor(np.random.randn(b, seq_len, dim))
     mask = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)
-    mhsa = MultiHeadSelfAttention(dim, num_heads, head_dim, max_seq_len, dropout_rate, mask)
+    mhsa = MultiHeadSelfAttention(dim, num_heads, head_dim, dropout_rate, mask)
     print(mhsa)
     y = mhsa(x)
+    print(x.shape == y.shape)
+
+    print("---------------- test residual ----------------")
+    x = Tensor(np.random.randn(b, seq_len, dim))
+    mask = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)
+    layer = ResidualLayer(dim, num_heads, head_dim, dropout_rate, mask, mlp_mult = 4)
+    print(layer)
+    y = layer(x)
     print(x.shape == y.shape)
