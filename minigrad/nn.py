@@ -51,7 +51,7 @@ class Embedding(Module):
 
     def __call__(self, tokens):
         assert np.issubdtype(tokens.dtype, np.dtype('int')),\
-                f"input dtype should be np.uint but instead got {tokens.dtype}"
+                f"input dtype should be np.int but instead got {tokens.dtype}"
         # grab embedding assigned to each token
         return self.w[tokens]
 
@@ -62,9 +62,15 @@ class Embedding(Module):
         return [self.w]
 
 class Dropout(Module):
+    '''
+    so we really don't need to save self.mask here. pytorch does because their backward pass works
+    differently, but ours gets handled entirely by Tensor. I've made Dropout a Module here just for
+    sake of making our final code resemble pytorch in use, even if it does not in implementation
+    '''
     def __init__(self, p: float = 0.1):
         super().__init__()
         self.p = p
+        self.mask = None
 
     def __call__(self, x: Tensor):
         if not self.training:
@@ -73,23 +79,22 @@ class Dropout(Module):
         # create a mask of the same shape as x
         # with probability (1 - p) for each element to be 1, and p to be 0
         mask = np.random.binomial(1, 1 - self.p, size=x.shape) / (1 - self.p)
-        mask = Tensor(mask, requires_grad=False) # mask doesn't need grad
-
-        return x * mask
+        self.mask = Tensor(mask, requires_grad=False) # mask doesn't need grad
+        
+        return x * self.mask
 
     def __repr__(self):
         return f"Dropout(p={self.p})"
     
 class LayerNorm(Module):
-    def __init__(self, dim: int, elementwise_affine: bool = True, bias: bool = True):
+    def __init__(self, dim: int, elementwise_affine: bool = True):
         self.dim = dim
         self.eps = 1e-5
 
         if elementwise_affine: 
             # TODO: should this be np.ones???
             self.affine = Parameter(np.random.normal(scale=0.02, size=dim).astype(np.float32))
-            if bias: # bias will only be created if elementwise_affine is also created
-                self.bias = Parameter(np.zeros(dim).astype(np.float32))
+            self.bias = Parameter(np.zeros(dim).astype(np.float32))
 
     def __call__(self, x):
         assert self.dim == x.shape[-1]
@@ -98,10 +103,7 @@ class LayerNorm(Module):
         var = x.var(keepdim=True)
         out = (x - mean) / (var + self.eps) ** 0.5
         # affine transformation
-        if self.affine:
-            out = out * self.affine
-            if self.bias:
-                out = out + self.bias
+        if self.affine: out = out * self.affine + self.bias
         return out
 
     def __repr__(self):
