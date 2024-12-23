@@ -31,17 +31,19 @@ class Linear(Module):
         self.w = Parameter(np.random.normal(scale=0.02, size=(in_dim, out_dim)).astype(np.float32))
         if bias: self.b = Parameter(np.zeros((1,out_dim)).astype(np.float32))
 
-    def __repr__(self):
-        return f"Weight:\n({self.w})\nBias:\n({self.b})" if self.b else f"Weight:\n({self.w})"
-
-    def parameters(self):
-        return [self.w, self.b]
-
     def __call__(self, x: Tensor):
         while x.ndim > self.w.ndim:
             self.w.unsqueeze(0)
             self.b.unsqueeze(0)
         return x @ self.w + self.b if self.b else x @ self.w
+
+    def __repr__(self):
+        return f"Weight:\n({self.w})\nBias:\n({self.b})" if self.b else f"Weight:\n({self.w})"
+
+    def parameters(self):
+        out = [self.w]
+        if self.b: out.append(self.b)
+        return out
 
 class Embedding(Module):
     def __init__(self, num_classes: int, embed_dim: int):
@@ -77,9 +79,6 @@ class Dropout(Module):
 
     def __repr__(self):
         return f"Dropout(p={self.p})"
-
-    def parameters(self): # do i need this function on every Module? or just the ones with parametes?
-        return []
     
 class LayerNorm(Module):
     def __init__(self, dim: int, elementwise_affine: bool = True, bias: bool = True):
@@ -106,16 +105,16 @@ class LayerNorm(Module):
         return out
 
     def __repr__(self):
-        if self.affine:
-            if self.bias:
-                return f"LayerNorm:\nElement-wise affie:\n({self.affine})\nBias:\n({self.bias})"  
-            else:
-                return f"LayerNorm:\nElement-wise affie:\n({self.affine})"
-        else:
-            return "LayerNorm"
+        out = "LayerNorm"
+        if self.affine: out += f"\nElement-wise affine:\n({self.affine})"
+        if self.bias: out += f"\nBias:\n({self.bias})"
+        return out
 
     def parameters(self):
-        return [self.affine, self.bias]
+        out = []
+        if self.affine: out += [self.affine]
+        if self.bias: out += [self.bias]
+        return out
 
 if __name__ == "__main__":
     b = 2
