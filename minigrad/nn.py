@@ -7,7 +7,8 @@ class Module: # just to make our syntax the same as pytorch's
 
     def zero_grad(self):
         for p in self.parameters():
-            p.zero_grad()
+            if p.requires_grad:
+                p.grad = np.zeros_like(p.data)
 
     def parameters(self):
         return []

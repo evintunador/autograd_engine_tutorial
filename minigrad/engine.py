@@ -211,7 +211,7 @@ class Tensor:
         return out
 
     def log(self):
-        assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logaritm'
+        assert np.all(self.data > 0), f'matrix contains values below 0; cannot take natural logarithm'
         eps = 1e-7 if self.data.dtype == np.float32 else 1e-16  # Adjust epsilon based on precision
         stabilized_data = np.clip(self.data, eps, None)  # Clip values to [eps, ∞)
         out = Tensor(np.log(stabilized_data), self.requires_grad, (self,))
@@ -379,10 +379,6 @@ class Tensor:
                 np.add.at(self.grad, idx, out.grad)
         out._backward = _backward
         return out
-
-    def zero_grad(self):
-        if self.requires_grad:
-            self.grad = np.zeros_like(self.data)
 
     def backward(self):
         """
