@@ -415,6 +415,16 @@ class Tensor:
         for node in reversed(topo):
             node._backward()
 
+    def masked_fill(self, mask: np.ndarray, fill_value: float) -> 'Tensor':
+        out = Tensor(np.where(mask, fill_value, self.data),
+                    requires_grad=self.requires_grad,
+                    _children=(self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += out.grad * (mask.data == False)
+        out._backward = _backward
+        return out
+
 
 class Parameter(Tensor):
     """
