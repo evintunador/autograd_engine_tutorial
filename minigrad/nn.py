@@ -28,6 +28,7 @@ class Module: # just to make our syntax the same as pytorch's
 
 class Linear(Module):
     def __init__(self, in_dim: int, out_dim: int, bias = True):
+        super().__init__()
         self.w = Parameter(np.random.normal(scale=0.02, size=(in_dim, out_dim)).astype(np.float32))
         if bias: self.b = Parameter(np.zeros((1,out_dim)).astype(np.float32))
 
@@ -47,6 +48,7 @@ class Linear(Module):
 
 class Embedding(Module):
     def __init__(self, num_classes: int, embed_dim: int):
+        super().__init__()
         self.w = Parameter(np.random.normal(scale=0.02, size=(num_classes, embed_dim)).astype(np.float32))
 
     def __call__(self, tokens):
@@ -88,6 +90,7 @@ class Dropout(Module):
     
 class LayerNorm(Module):
     def __init__(self, dim: int, elementwise_affine: bool = True):
+        super().__init__()
         self.dim = dim
         self.eps = 1e-5
 
