@@ -156,28 +156,45 @@ class Tensor:
         return Tensor(other) / self
         
     def __matmul__(self, other):
-        # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
+        """
+        For tensors A and B, this uses np.matmul(A.data, B.data) which automatically
+        broadcasts across the leading dimensions if they are compatible. The shape
+        of the result is the broadcasted shape of A and B (across all but the last
+        two dimensions), and then the final two dimensions are (m, p) where
+        A is (..., m, n) and B is (..., n, p).
+        """
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
-        
-        assert self.ndim >= 2 and other.ndim >= 2, \
-            f'Both tensors must have at least 2 dimensions for matrix multiplication: Got x1:{self.ndim}, x2:{other.ndim}'
-        assert self.shape[-1] == other.shape[-2], \
-            f"Mismatch in matrix multiplication dimensions: {self.shape[-1]} != {other.shape[-2]}"
-        assert other.shape[:-1] == () or other.shape[:-2] == self.shape[:-2], \
-            f"Preceding dimensions must either match exactly or be absent. Got x1:{self.shape[:-2]}, x2:{other.shape[:-2]}"
 
-        # calc forward pass
-        out = Tensor(self.data @ other.data, # (..., m, n) @ (..., n, p) -> (..., m, p)
-                     requires_grad = (self.requires_grad or other.requires_grad),
-                     _children = (self, other)) 
-        
+        # `A @ B -> out` which has shape (...,m,n) @ (...,n,p) -> (...,m,p)
+        out = Tensor(np.matmul(self.data, other.data), 
+                     requires_grad=(self.requires_grad or other.requires_grad),
+                     _children=(self, other))
+
         def _backward():
             if self.requires_grad:
-                self.grad += out.grad @ other.data.transpose() # (..., m, p)   @ (..., n, p).T -> (..., m, p) @ (..., p, n) -> (..., m, n)
+                # dL/dA = dL/dOut @ B^T which has shape (...,m,p) @ (...,p,n) -> (...,m,n)
+                grad_A = np.matmul(out.grad, np.swapaxes(other.data, -1, -2))
+
+                # If shapes have been broadcast, we reduce the extra axes by summation
+                while grad_A.ndim > self.grad.ndim:
+                    grad_A = grad_A.sum(axis=0)
+                for i in range(grad_A.ndim):
+                    if grad_A.shape[i] != self.grad.shape[i]:
+                        grad_A = grad_A.sum(axis=i, keepdims=True)
+
+                self.grad += grad_A
+
             if other.requires_grad:
-                other.grad += self.data.transpose() @ out.grad # (..., m, n).T @ (..., m, p)   -> (..., n, m) @ (..., m, p) -> (..., n, p)
+                # dL/dB = A^T @ dL/dOut which has shape (...,n,m) @ (...,m,p) -> (...,n,p)
+                grad_B = np.matmul(np.swapaxes(self.data, -1, -2), out.grad)
+                while grad_B.ndim > other.grad.ndim:
+                    grad_B = grad_B.sum(axis=0)
+                for i in range(grad_B.ndim):
+                    if grad_B.shape[i] != other.grad.shape[i]:
+                        grad_B = grad_B.sum(axis=i, keepdims=True)
+                other.grad += grad_B
+
         out._backward = _backward
-        
         return out
     
     def _safe_dim(self, dim: int):
@@ -472,3 +489,16 @@ if __name__ == "__main__":
     m.backward()
     print(m)
     print(b)
+
+    print('------------------------ test matmul ------------------------')
+    b, h, s, d = 2, 4, 5, 8
+    k = Tensor(np.random.randn(b, h, s, d), requires_grad=True)
+    print(k.shape)
+    v = Tensor(np.random.randn(b, h, d, s), requires_grad=True)
+    print(v.shape)
+    attention_logits = k @ v
+    print(attention_logits.shape)
+    attention_logits.backward()
+    print(attention_logits)
+    print(k)
+    print(v)
