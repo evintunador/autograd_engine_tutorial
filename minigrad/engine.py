@@ -179,18 +179,28 @@ class Tensor:
         out._backward = _backward
         
         return out
+    
+    def _safe_dim(self, dim: int):
+        assert not dim or isinstance(dim, int), "dim must be None or an integer"
+        # normalize dim to ensure that calculations which don't like negative numbers work
+        if dim is not None and dim < 0:
+            # Convert negative axes to positive
+            dim += self.ndim  # e.g. -1 => +2 for a 3D tensor
+        return dim
         
-    def sum(self, dim: int = -1):
-        out = Tensor(np.sum(self.data, axis = dim), self.requires_grad, (self,))
+    def sum(self, dim: int = -1, keepdim: bool = False):
+        dim = self._safe_dim(dim)
+        out = Tensor(np.sum(self.data, axis = dim, keepdims=keepdim), 
+                     self.requires_grad, (self,))
         def _backward():
             if self.requires_grad:
                 self.grad += np.broadcast_to(out.grad, self.shape)
         out._backward = _backward
         return out
     
-    def mean(self, dim: int = -1):
-        # i don't think i need a _backward because sum and truediv already implement them into out
-        return self.sum(dim) / self.shape[dim]
+    def mean(self, dim: int = -1, keepdim: bool = False):
+        dim = self._safe_dim(dim)
+        return self.sum(dim, keepdim) / self.shape[dim]
 
     def exp(self):
         out = Tensor(np.exp(self.data), self.requires_grad, (self,))
@@ -218,17 +228,9 @@ class Tensor:
                 self.grad += (out.data > 0) * out.grad
         out._backward = _backward
         return out
-    
-    def _normalize_dim(self, dim: int):
-        # normalize dim to ensure that calculations which don't like negative numbers work
-        if dim is not None and dim < 0:
-            # Convert negative axes to positive
-            dim += self.ndim  # e.g. -1 => +2 for a 3D tensor
-        return dim
 
     def max(self, dim = None):
-        assert not dim or isinstance(dim, int), "dim must be None or an integer"
-        dim = self._normalize_dim(dim)
+        dim = self._safe_dim(dim)
 
         # grab indices of the maximum values
         idx = np.argmax(self.data, dim)
@@ -261,9 +263,8 @@ class Tensor:
         
         return maximums, idx
 
-    def min(self, dim = None):
-        assert not dim or isinstance(dim, int), "dim must be None or an integer"
-        dim = self._normalize_dim(dim)
+    def min(self, dim: int = None):
+        dim = self._safe_dim(dim)
 
         # grab indices of the maximum values
         idx = np.argmin(self.data, dim)
@@ -302,11 +303,11 @@ class Tensor:
         stable_self = self - maximums.unsqueeze(dim)
         # calculate softmax
         exps = stable_self.exp()
-        sum_exps = exps.sum(dim=dim).unsqueeze(dim)#.broadcast_to(self.shape)
+        sum_exps = exps.sum(dim, keepdim = True)
         return exps / sum_exps
 
     def __pow__(self, pow: int):
-        '''entry-wise exponentiation that supports integer powers'''
+        '''entry-wise exponentiation'''
         assert isinstance(pow, (int, float)), f'power must be int or float but got {type(pow)}'
         out = Tensor(self.data ** pow, self.requires_grad, (self,))
         def _backward(): # local grad: d/dx (x^p) = p * x^(p - 1)
@@ -315,11 +316,11 @@ class Tensor:
         out._backward = _backward
         return out
     
-    def var(self, dim: int = -1):
-        return ((self - self.mean(dim).unsqueeze(dim)) ** 2).sum(dim) / self.shape[dim]
+    def var(self, dim: int = -1, keepdim: bool = False):
+        return ((self - self.mean(dim, keepdim=True)) ** 2).sum(dim, keepdim) / self.shape[dim]
     
-    def sd(self, dim: int = -1):
-        return self.var(dim) ** 0.5
+    def sd(self, dim: int = -1, keepdim: bool = False):
+        return self.var(dim, keepdim) ** 0.5
 
     def transpose(self, axes: tuple = None):
         if axes is None: # defaults to transposing final two dims

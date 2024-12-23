@@ -87,6 +87,7 @@ class LayerNorm(Module):
         self.eps = 1e-5
 
         if elementwise_affine: 
+            # TODO: should this be np.ones???
             self.affine = Parameter(np.random.normal(scale=0.02, size=dim).astype(np.float32))
             if bias: # bias will only be created if elementwise_affine is also created
                 self.bias = Parameter(np.zeros(dim).astype(np.float32))
@@ -94,8 +95,8 @@ class LayerNorm(Module):
     def __call__(self, x):
         assert self.dim == x.shape[-1]
         # normalize
-        mean = x.mean().unsqueeze(-1)
-        var = x.var().unsqueeze(-1)
+        mean = x.mean(keepdim=True)
+        var = x.var(keepdim=True)
         out = (x - mean) / (var + self.eps) ** 0.5
         # affine transformation
         if self.affine:
