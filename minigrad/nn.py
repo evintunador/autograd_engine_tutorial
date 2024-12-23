@@ -111,14 +111,12 @@ class LayerNorm(Module):
 
     def __repr__(self):
         out = "LayerNorm"
-        if self.affine: out += f"\nElement-wise affine:\n({self.affine})"
-        if self.bias: out += f"\nBias:\n({self.bias})"
+        if self.affine: out += f"\nElement-wise affine:\n({self.affine})\nBias:\n({self.bias})"
         return out
 
     def parameters(self):
         out = []
-        if self.affine: out += [self.affine]
-        if self.bias: out += [self.bias]
+        if self.affine: out += [self.affine, self.bias]
         return out
 
 if __name__ == "__main__":
