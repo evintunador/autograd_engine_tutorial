@@ -56,7 +56,7 @@ class MultiHeadSelfAttention(nn.Module):
         # scale logits
         scaled_logits = logits * self.scale
         # apply mask
-        masked_logits = scaled_logits.masked_fill(mask, float('-inf'))
+        masked_logits = scaled_logits.masked_fill(mask[:s,:s], float('-inf'))
         # turn the logits into probability scores
         scores = masked_logits.softmax()
         # dropout; if we're training then dropout_rate>0 but if doing inference it'll be set ==0 in the model class
@@ -106,6 +106,58 @@ class ResidualLayer(nn.Module):
         x = x + self.mhsa(self.ln1(x))
         x = x + self.mlp(self.ln2(x))
         return x
+    
+class GPT(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.max_seq_len = config['max_seq_len'] # we'll be using this one in __call__
+
+        self.tok_embeddings = nn.Embedding(config['vocab_len'], config['model_dim'])
+        self.scale = config['model_dim'] ** -0.5
+        self.pos_embeddings = nn.Embedding(config['max_seq_len'], config['model_dim'])
+
+        self.mask = np.triu(np.ones((config['max_seq_len'], config['max_seq_len'])), k=1).astype(bool)
+        self.layers = [ResidualLayer(config['model_dim'], 
+                                     config['num_heads'], 
+                                     config['head_dim'], 
+                                     config['dropout_rate'],
+                                     self.mask,
+                                     config['mlp_mult']) 
+                       for _ in range(config['num_layers'])]
+
+        self.final_norm = nn.LayerNorm(config['model_dim'])
+        self.output_proj = nn.Linear(config['model_dim'], config['vocab_len'])
+        self.criterion = nn.CrossEntropyLoss(config['vocab_len'], pad_token = None)#config['vocab_len'] - 1)
+
+    def children(self):
+        return [self.tok_embeddings, self.pos_embeddings, self.output_proj, self.criterion] + self.layers
+
+    def __call__(self, input_token_ids, target_token_ids = None):
+        B, S = input_token_ids.shape
+        if input_token_ids.ndim == 1: # if only one sequence is passed in, aka batch_size==1
+            input_tokens = input_tokens.unsqueeze(0)
+
+        if target_token_ids is not None: # if training
+            assert B, S == target_token_ids.shape
+            assert S == self.max_seq_len
+        else: # if inference
+            assert S <= self.max_seq_len
+
+        x = self.tok_embeddings(input_token_ids)
+        pos = self.pos_embeddings(np.array([range(S)])).broadcast_to(x.shape)
+        x = (x + pos) * self.scale
+
+        for layer in self.layers:
+            x = layer(x)
+
+        logits = self.output_proj(self.final_norm(x))
+        probabilities = logits.softmax()
+
+        loss = None
+        if target_token_ids is not None:
+            loss = self.criterion(probabilities, target_token_ids)
+        
+        return probabilities, loss
 
 if __name__ == "__main__":
     b = 2
@@ -117,14 +169,14 @@ if __name__ == "__main__":
     head_dim = 2
     dropout_rate = 0.1
 
-    print("---------------- test mlp ----------------")
+    print("\n\n---------------- test mlp ----------------")
     x = Tensor(np.random.randn(b, seq_len, dim))
     mlp = MultiLayerPerceptron(dim, 4*dim, dim)
     print(mlp)
     y = mlp(x)
     print(y.shape == x.shape)
 
-    print("---------------- test mhsa ----------------")
+    print("\n\n---------------- test mhsa ----------------")
     x = Tensor(np.random.randn(b, seq_len, dim))
     mask = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)
     mhsa = MultiHeadSelfAttention(dim, num_heads, head_dim, dropout_rate, mask)
@@ -132,10 +184,30 @@ if __name__ == "__main__":
     y = mhsa(x)
     print(x.shape == y.shape)
 
-    print("---------------- test residual ----------------")
+    print("\n\n---------------- test residual ----------------")
     x = Tensor(np.random.randn(b, seq_len, dim))
     mask = np.triu(np.ones((seq_len, seq_len)), k=1).astype(bool)
     layer = ResidualLayer(dim, num_heads, head_dim, dropout_rate, mask, mlp_mult = 4)
     print(layer)
     y = layer(x)
     print(x.shape == y.shape)
+
+    print('\n\n-------------- test gpt model -------------')
+    batch_size = 2
+    config = {
+        'vocab_len':10,
+        'model_dim':8,
+        'max_seq_len':5,
+        'num_heads':2,
+        'head_dim':4,
+        'mlp_mult':4,
+        'dropout_rate':0.1,
+        'num_layers':2
+    }
+    gpt = GPT(config)
+    input_token_ids = np.random.randint(0, config['vocab_len'], size=(batch_size, config['max_seq_len']))
+    target_token_ids = np.random.randint(0, config['vocab_len'], size=(batch_size, config['max_seq_len']))
+    probabilities, loss = gpt(input_token_ids, target_token_ids)
+    loss.backward()
+    print(loss)
+    print(probabilities)

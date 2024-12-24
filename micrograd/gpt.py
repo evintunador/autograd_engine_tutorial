@@ -176,7 +176,7 @@ class GPT(Module):
 
         self.output_proj = Linear(self.model_dim, self.vocab_len)
 
-        self.criterion = CrossEntropyLoss(self.vocab_len, pad_token = self.vocab_len - 1)
+        self.criterion = CrossEntropyLoss(self.vocab_len, pad_token = None)#self.vocab_len - 1)
 
     def parameters(self):
         layer_params = []

@@ -24,6 +24,7 @@ the plan for this repo is to create tutorials on autograd engines for three leve
 the purpose of this lesson is for absolute beginners with a programming (as opposed to math) background to learn about the math and implementation of GPTs all the way from the barebones autograd engine and up to the GPT operations itself. the basic building block of micrograd is the `Value` object, each of which is just a single floating point number for the data and another single floating point number to keep track of the data's gradient. the first half or so of this lesson is roughly equivalent to [karpathy's `micrograd`](https://youtu.be/VMj-3S1tku0?si=FM0qtfV-cvXr2kDJ) while the second half is an extension to implement a full GPT
 ##### TODO:
 - [ ] make max/min functions maintain gradient
+- [ ] make model output logits & celoos do softmax within so that inference can do softmax
 - [ ] build a way to test against pytorch (or maybe against minigrad, that sounds easier)
 - [ ] write jupyter notebook guide
 - [ ] make video
@@ -33,7 +34,8 @@ the purpose of this lesson is for people already confident with linear algebra a
 ##### TODO:
 - [x] celoss
 	- [x] one-hot
-- [ ] model itself
+- [x] model itself
+- [ ] make model output logits & celoos do softmax within so that inference can do softmax
 - [ ] tokenizer
 - [ ] get batch
 - [ ] inference
