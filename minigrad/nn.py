@@ -154,15 +154,10 @@ class CrossEntropyLoss(Module):
         
         # If we have a pad token, ignore those positions
         if self.pad_token is not None:
-            valid_mask = (targets_flat != self.pad_token).astype(np.float32) # (B*L)
-            
-            # Sum of negative log likelihood for valid positions only
-            loss = - (log_picked * valid_mask).sum() / float(valid_mask.sum()) # ((B*L) * (B*L)).sum() / (1) -> (B*L).sum() / (1) -> (1) / (1) -> (1)
-        else:
-            # Average over all positions if no pad token is set
-            loss = - log_picked.mean() # (B*L) -> (1)
-        
-        return loss
+            pad_mask = (targets_flat == self.pad_token).astype(np.float32) # (B*L)
+            log_picked = log_picked.masked_fill(pad_mask, 0.)
+
+        return - log_picked.mean() # (B*L) -> (1)
 
 if __name__ == "__main__":
     b = 2

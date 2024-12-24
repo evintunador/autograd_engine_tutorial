@@ -31,8 +31,8 @@ the purpose of this lesson is for absolute beginners with a programming (as oppo
 ## minigrad
 the purpose of this lesson is for people already confident with linear algebra and calculus to learn exactly what's happening in GPTs all the way from the barebones autograd engine and up to the GPT operations itself. to make this happen we'll be doing everything with numpy arrays, meaning that the basic unit of our engine will be tensors as opposed to individual values
 ##### TODO:
-- [ ] celoss
-	- [ ] one-hot
+- [x] celoss
+	- [x] one-hot
 - [ ] model itself
 - [ ] tokenizer
 - [ ] get batch

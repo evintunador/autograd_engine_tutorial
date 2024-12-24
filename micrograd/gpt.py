@@ -30,6 +30,7 @@ def layer_norm(x):
 
 class Mask(Module):
     def __init__(self, max_seq_len):
+        super().__init__()
         self.max_seq_len = max_seq_len
         self.mask = [ [1] * (i + 1) + [0] * (max_seq_len - i - 1) for i in range(max_seq_len)]
 
@@ -51,6 +52,7 @@ class Mask(Module):
 
 class MultiHeadSelfAttention(Module):
     def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mask):
+        super().__init__()
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -117,6 +119,7 @@ class MultiHeadSelfAttention(Module):
 
 class MultiLayerPerceptron(Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
         self.up = Linear(input_dim, hidden_dim)
         self.down = Linear(hidden_dim, output_dim)
 
@@ -135,6 +138,7 @@ class MultiLayerPerceptron(Module):
 
 class ResidualLayer(Module):
     def __init__(self, model_dim, num_heads, head_dim, max_seq_len, mlp_mult, mask):
+        super().__init__()
         self.mhsa = MultiHeadSelfAttention(model_dim, num_heads, head_dim, max_seq_len, mask)
         self.mlp = MultiLayerPerceptron(model_dim, mlp_mult * model_dim, model_dim)
 
@@ -151,6 +155,7 @@ class ResidualLayer(Module):
 
 class GPT(Module):
     def __init__(self, config):
+        super().__init__()
         self.vocab_len = config['vocab_len']
         self.model_dim = config['model_dim']
         self.max_seq_len = config['max_seq_len']
