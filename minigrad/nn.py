@@ -118,6 +118,51 @@ class LayerNorm(Module):
         out = []
         if self.affine: out += [self.affine, self.bias]
         return out
+    
+
+
+class CrossEntropyLoss(Module):
+    def __init__(self, vocab_len: int, pad_token: int = None):
+        super().__init__()
+        self.vocab_len = vocab_len
+        self.pad_token = pad_token
+
+    def __call__(self, probabilities: Tensor, targets: np.ndarray) -> Tensor:
+        '''
+        inputs: 
+          probabilities - Tensor of shape (batch_size, seq_len, vocab_len) 
+                          representing predicted probabilities. Each slice along last dimension
+                          must sum to 1 (i.e., a proper probability distribution).
+          targets       - np.ndarray of shape (batch_size, seq_len) of integer token indices
+
+        output: 
+          Scalar Tensor representing average cross-entropy loss across the whole batch/sequence.
+          If pad_token is set, those positions are ignored in the average.
+        '''
+        B, L, V = probabilities.shape
+        # Basic shape checks
+        assert (B, L) == targets.shape, \
+            f"Shape mismatch: probabilities {probabilities.shape} vs targets {targets.shape}"
+        
+        # Flatten predictions and targets so we can index easily
+        probabilities_2d = probabilities.reshape((B*L, V))  # (B, L, V) -> (B*L, V)
+        targets_flat = targets.ravel()                  # (B, L) -> (B*L)
+        
+        # Gather probabilities of the correct classes
+        picked_probs = probabilities_2d[range(probabilities_2d.shape[0]), targets_flat] # (B*L, V) -> (B*L)
+        log_picked = picked_probs.log()
+        
+        # If we have a pad token, ignore those positions
+        if self.pad_token is not None:
+            valid_mask = (targets_flat != self.pad_token).astype(np.float32) # (B*L)
+            
+            # Sum of negative log likelihood for valid positions only
+            loss = - (log_picked * valid_mask).sum() / float(valid_mask.sum()) # ((B*L) * (B*L)).sum() / (1) -> (B*L).sum() / (1) -> (1) / (1) -> (1)
+        else:
+            # Average over all positions if no pad token is set
+            loss = - log_picked.mean() # (B*L) -> (1)
+        
+        return loss
 
 if __name__ == "__main__":
     b = 2
@@ -172,4 +217,30 @@ if __name__ == "__main__":
     y = ln(x)
     print(y)
     print(x)
+    
+    print("---------------- test cross entropy loss ----------------")
+    # Test case 1: Basic functionality without pad token
+    batch_size, seq_len, vocab_size = 2, 3, 5
+    # Create some "logits" and apply softmax to get probabilities
+    logits = Tensor(np.random.randn(batch_size, seq_len, vocab_size), requires_grad=True)
+    probs = logits.softmax(dim=-1)
+    # Create some random target indices
+    targets = np.random.randint(0, vocab_size, size=(batch_size, seq_len))
+    targets_pad = targets.copy()
+    targets_pad[:,-1] = 0
+    
+    celoss = CrossEntropyLoss(vocab_size)
+    loss = celoss(probs, targets)
+    print("Basic loss (no padding):", loss.data)
+    loss.backward()
+    print(logits)
+    logits.grad = np.zeros_like(logits.grad)
+    
+    # Test case 2: With pad token
+    pad_token = 0
+    celoss_pad = CrossEntropyLoss(vocab_size, pad_token=pad_token)
+    loss_pad = celoss_pad(probs, targets_pad)
+    print("Loss with padding:", loss_pad.data)
+    loss_pad.backward()
+    print(logits)
     

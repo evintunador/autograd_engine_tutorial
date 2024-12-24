@@ -17,7 +17,7 @@ class Tensor:
             if not np.issubdtype(data.dtype, np.floating):
                 data = data.astype(np.float32)
         else:
-            raise ValueError('Invalid data type for Tensor.')
+            raise ValueError(f'Invalid data type {type(data)} for Tensor.')
         
         self.data = data
         
