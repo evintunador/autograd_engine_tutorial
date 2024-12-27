@@ -1,3 +1,4 @@
+# https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html
 # this "fused softmax" operation will be significantly faster than pytorch's native op
 #   for a particular class of matrices: those whose rows can fit in the GPU's SRAM
 

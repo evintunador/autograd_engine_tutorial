@@ -1,3 +1,4 @@
+# https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html#sphx-glr-getting-started-tutorials-01-vector-add-py
 import torch
 import triton
 import triton.language as tl
