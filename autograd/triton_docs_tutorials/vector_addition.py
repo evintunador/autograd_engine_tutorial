@@ -97,4 +97,4 @@ def benchmark(size, provider):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: add(x, y), quantiles=quantiles)
     gbps = lambda ms: 3 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)
-benchmark.run(print_data=True, show_plots=True, save_path='.')
+benchmark.run(print_data=True, save_path='./benchmark_results/') # show_plots=True, 
