@@ -41,10 +41,9 @@ the purpose of this lesson is for people already confident with linear algebra a
 - [x] get batch
 	- not sure why i felt the need to swap out micrograd's terrible get_batch funciton for a different but equally terrible one
 		- [ ] improve?
-- [ ] inference
-- [ ] train loop
+- [x] inference
+- [x] train loop
 - [ ] build a way to test against pytorch (or maybe against micrograd or autograd, that sounds easier)
-- [ ] *optional:* code to convert trained model to pytorch and show how much faster it is?
 - [ ] write jupyter notebook guide
 - [ ] make video
 
