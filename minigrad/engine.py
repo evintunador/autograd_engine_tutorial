@@ -366,7 +366,8 @@ class Tensor:
         return out
 
     def broadcast_to(self, shape: tuple):
-        assert self.shape != shape, f"broadcast shape {shape} must be different from original {self.shape}"
+        if self.shape == shape:
+            return self
         for i in range(self.ndim):
             if self.shape[i] != shape[i]:
                 dim = i
@@ -396,6 +397,19 @@ class Tensor:
                 np.add.at(self.grad, idx, out.grad)
         out._backward = _backward
         return out
+        
+    def masked_fill(self, mask: np.ndarray, fill_value: float) -> 'Tensor':
+        out = Tensor(np.where(mask, fill_value, self.data),
+                    requires_grad=self.requires_grad,
+                    _children=(self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += out.grad * (mask.data == False)
+        out._backward = _backward
+        return out
+
+    def zero_grad(self):
+        self.grad = np.zeros_like(self.grad)
 
     def backward(self):
         """
@@ -415,16 +429,6 @@ class Tensor:
         for node in reversed(topo):
             node._backward()
 
-    def masked_fill(self, mask: np.ndarray, fill_value: float) -> 'Tensor':
-        out = Tensor(np.where(mask, fill_value, self.data),
-                    requires_grad=self.requires_grad,
-                    _children=(self,))
-        def _backward():
-            if self.requires_grad:
-                self.grad += out.grad * (mask.data == False)
-        out._backward = _backward
-        return out
-
 
 class Parameter(Tensor):
     """
@@ -434,9 +438,6 @@ class Parameter(Tensor):
     """
     def __init__(self, data: Union[float, int, np.ndarray]):
         super().__init__(data, requires_grad=True)
-
-    def __repr__(self):
-        return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ class MultiHeadSelfAttention(nn.Module):
         # scale logits
         scaled_logits = logits * self.scale
         # apply mask
-        masked_logits = scaled_logits.masked_fill(mask[:s,:s], float('-inf'))
+        masked_logits = scaled_logits.masked_fill(self.mask[:s,:s], float('-inf'))
         # turn the logits into probability scores
         scores = masked_logits.softmax()
         # dropout; if we're training then dropout_rate>0 but if doing inference it'll be set ==0 in the model class
@@ -130,7 +130,11 @@ class GPT(nn.Module):
         self.criterion = nn.CrossEntropyLoss(config['vocab_len'], pad_token = None)#config['vocab_len'] - 1)
 
     def children(self):
-        return [self.tok_embeddings, self.pos_embeddings, self.output_proj, self.criterion] + self.layers
+        return self.layers + [self.tok_embeddings, 
+                              self.pos_embeddings, 
+                              self.final_norm, 
+                              self.output_proj, 
+                              self.criterion]
 
     def __call__(self, input_token_ids, target_token_ids = None):
         B, S = input_token_ids.shape

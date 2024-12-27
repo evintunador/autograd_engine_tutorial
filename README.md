@@ -36,8 +36,11 @@ the purpose of this lesson is for people already confident with linear algebra a
 	- [x] one-hot
 - [x] model itself
 - [ ] make model output logits & celoos do softmax within so that inference can do softmax
-- [ ] tokenizer
-- [ ] get batch
+- [x] tokenizer
+	- reused from micrograd bc i'm lazy & this isn't a lesson about tokenization
+- [x] get batch
+	- not sure why i felt the need to swap out micrograd's terrible get_batch funciton for a different but equally terrible one
+		- [ ] improve?
 - [ ] inference
 - [ ] train loop
 - [ ] build a way to test against pytorch (or maybe against micrograd or autograd, that sounds easier)

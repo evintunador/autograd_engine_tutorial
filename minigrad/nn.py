@@ -5,14 +5,6 @@ class Module: # just to make our syntax the same as pytorch's
     def __init__(self):
         self.training = True
 
-    def zero_grad(self):
-        for p in self.parameters():
-            if p.requires_grad:
-                p.grad = np.zeros_like(p.data)
-
-    def parameters(self):
-        return []
-
     def train(self, mode=True):
         self.training = mode
         for m in self.children():
@@ -26,6 +18,17 @@ class Module: # just to make our syntax the same as pytorch's
         # returns a list or iterator of immediate children modules
         # this will be useful for recursively setting training mode
         return []
+    
+    def parameters(self):
+        '''
+        default parameter-yielding method
+        modules which actually have parameters should overwrite this method
+        '''
+        out = []
+        for child in self.children():
+            if child.parameters() is not None:
+                out += child.parameters()
+        return out if out else None
 
 class Linear(Module):
     def __init__(self, in_dim: int, out_dim: int, bias = True):
@@ -42,9 +45,7 @@ class Linear(Module):
         return f"Weight:\n({self.w})\nBias:\n({self.b})" if self.b else f"Weight:\n({self.w})"
 
     def parameters(self):
-        out = [self.w]
-        if self.b: out.append(self.b)
-        return out
+        return [self.w, self.b] if self.b is not None else [self.w]
 
 class Embedding(Module):
     def __init__(self, num_classes: int, embed_dim: int):
@@ -88,6 +89,9 @@ class Dropout(Module):
     def __repr__(self):
         return f"Dropout(p={self.p})"
     
+    def parameters(self):
+        return
+
 class LayerNorm(Module):
     def __init__(self, dim: int, elementwise_affine: bool = True):
         super().__init__()
@@ -115,12 +119,8 @@ class LayerNorm(Module):
         return out
 
     def parameters(self):
-        out = []
-        if self.affine: out += [self.affine, self.bias]
-        return out
+        return [self.affine, self.bias] if self.affine else None
     
-
-
 class CrossEntropyLoss(Module):
     def __init__(self, vocab_len: int, pad_token: int = None):
         super().__init__()
@@ -158,6 +158,9 @@ class CrossEntropyLoss(Module):
             log_picked = log_picked.masked_fill(pad_mask, 0.)
 
         return - log_picked.mean() # (B*L) -> (1)
+    
+    def parameters(self):
+        return
 
 if __name__ == "__main__":
     b = 2
