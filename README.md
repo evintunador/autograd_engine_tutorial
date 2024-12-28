@@ -49,6 +49,17 @@ the purpose of this lesson is for people already confident with linear algebra a
 
 ## autograd (Triton)
 the purpose of this lesson is for people already confident in the math behind autograd engines and GPTs to learn exactly what's happening at the level of the GPU hardware. you can think of autograd as a replication of pytorch/tensorflow/jax/mlx/tinygrad/etc except that instead of being meant to actually be used, which would require it be flexible and robust, it is meant for educational purposes. As such, we'll only be implementing the operations that are absolutely necessary in order to create a GPT and not worrying much about unexpected edge cases, just like how we did in micrograd and minigrad
+
+### why triton?
+You might be asking: why are we using Triton instead of CUDA? I'm open to the idea of learning and then doing a lesson on CUDA (and MPS for that matter) in the future, but for now here are the pros and cons that it came down to:
+
+|      | triton                                                                                            | cuda                                                             |
+| ---- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| pros | - written in Python (quicker to learn)<br>- works on more than just Nvidia GPUs<br>- open-sourced | - broadly used<br>- linux or windows                             |
+| cons | - less commonly used<br>- requires linux                                                          | - written in C<br>- only works on Nvidia GPUs<br>- closed-source |
+
+Personally I'm on a Mac so i plan on doing all my work on a cloud provider like [lambdalabs](https://lambdalabs.com) anyways so the windows availability didn't matter much to me. That and I highly value the pythonic syntax and potential future widespread compatibility. 
+
 ##### TODO:
 - [ ] begin learning Triton
 	- [ ] realize i'm in way over my head
