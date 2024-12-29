@@ -14,7 +14,7 @@ def naive_softmax(x):
     '''
     Built for input of size (M,N)
     we subtract the maximum element in order to avoid numerical overflows when doing .exp()
-    softmax is invariant to this shift
+        softmax is invariant to this shift
     '''
     # read MN elements; write M elements
     x_max = x.max(dim=1)[0] #[0] grabs the values as opposed to the indicees
@@ -50,32 +50,38 @@ def softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and out
                     num_stages: tl.constexpr): 
     # num_stages relates to overlapping memory operations with computation operations;
     # when one piece of data is being processed, the GPU can simultaneously load the next piece
-    # more stages = more overlapping, but requires more memory
-    # tl.constexpr is a type that tells teh compiler that the value must be known at compiletime (not runtime)
+    # more stages -> more overlapping, but requires more memory
+    # tl.constexpr is a type that tells the compiler that the value must be known at compile-time (not runtime)
     
-    # starting row of the program
-    row_start = tl.program_id(0) # gets this program's ID (a program is an instantiation of this kernel)
-    row_step = tl.num_programs(0) # gets total number of parallel programs
+    # there are multiple "programs" processing data (a program is a unique instantiation of this kernel)
+    # programs can be defined along multiple dimensions when the inputs have multiple dimensions
+    # this op is 1D so axis=0 is the only option, but bigger operations later may define pid as a tuple
+    # here we identify which program we are:
+    row_start = tl.program_id(0) 
+    # then this gets the total number of parallel programs
+    row_step = tl.num_programs(0) 
         # Each program processes rows strided by row_step 
         # (ex. if there are 4 programs, program 0 handles rows 0,4,8...)
     
     for row_idx in tl.range(row_start, n_rows, row_step, num_stages=num_stages):
         # the stride represents how much we need to increase the pointer to advance 1 row
         row_start_ptr = input_ptr + row_idx * input_row_stride
-            # if intuitively you think that input_row_stride should be 1, then you're right
-            #  but what if a view of a manipulated tensor were passed in? we don't take advantage of
-            #  this idea in this code; rather we're just writing it this way to prepare ourselves for
-            #  good practices and what we'll do later
+            # if intuitively you think that input_row_stride should be 1, then in this case you're right,
+            #  but what if a view of a manipulated tensor were passed in? for example, if our matrix's rows
+            #  were twice the size of what conveniently fits in SRAM, then we'd make a view of that matrix
+            #  where each row is split into two rows in order to take advantage of this kernel. we don't 
+            #  actually take advantage of this idea in this code; rather we're just writing it this way 
+            #  to prepare ourselves for good practices in future lessons
         # the block size is the next power of two greater than n_cols, 
         #   so we can fit each row in a single block
         col_offsets = tl.arange(0, BLOCK_SIZE)
         input_ptrs = row_start_ptr + col_offsets
         # load the row into SRAM, using a mask since BLOCK_SIZE may be > than n_cols
         mask = col_offsets < n_cols
-        row = tl.load(input_ptrs, mask=mask, other=-float('inf'))
+        row = tl.load(input_ptrs, mask=mask, other=-float('inf')) # fill in masked out indices with -inf
         # subtract maximum for numerical stability
         row_minus_max = row - tl.max(row, axis=0)
-            # all the invalid -inf values remain -inf when u subtract the max
+            # all the invalid -inf values remain -inf when we subtract the max
         # note that exponentiation in Triton is fast but approximate
         numerator = tl.exp(row_minus_max)
             # all the -inf values get set to 0
@@ -83,11 +89,11 @@ def softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and out
             # all the invalid 0 values do get summed but don't matter since they're 0
         softmax_output = numerator / denominator
             # all the invalid 0's are 0/sum and therefore remain 0
-        # write back output to DRAM
+        # write output back to DRAM
         output_row_start_ptr = output_ptr + row_idx * output_row_stride
         output_ptrs = output_row_start_ptr + col_offsets
         tl.store(output_ptrs, softmax_output, mask=mask)
-            # then we only store back the valid values
+            # using our mask we only store back the valid values
 
 # and now we'll create a helper function that enqueues the kernel and its meta-arguments
 #   for any given input tensor. these properties will be used in the helper function to calculate
@@ -207,6 +213,11 @@ def benchmark(M, N, provider):
     if provider == 'triton':
         ms = triton.testing.do_bench(lambda: softmax(x))
     gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+        # 2 = number of memory operations (1 read + 1 write)
+        # x.numel() = number of elements
+        # x.element_size() = bytes per element (4 for float32)
+        # 1e-9 converts bytes to GB
+        # ms * 1e-3 converts milliseconds to seconds
     return gbps(ms)
 
-benchmark.run(show_plots=True, save_path='./benchmark_results/')
+benchmark.run(print_data=True, save_path='./benchmark_results/')

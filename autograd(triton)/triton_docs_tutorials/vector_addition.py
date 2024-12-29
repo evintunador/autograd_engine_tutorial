@@ -6,31 +6,43 @@ import triton.language as tl
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 print(DEVICE)
 
-
-@triton.jit
-def add_kernel(x_ptr, # pointer to first input vector
-               y_ptr, # ptr to second
+@triton.jit # this decorator tells Triton to compile this function into GPU code
+def add_kernel(x_ptr, y_ptr,# pointers to input vectors
                output_ptr, # ptr to output vector
+                    # each torch.tensor object is implicitly converted into a pointer to its first element
                n_elements, # size of vector
-               BLOCK_SIZE: tl.constexpr, # number of elements each program should process
-               ):
-    # there are multiple "programs" processing data
+               BLOCK_SIZE: tl.constexpr): # number of elements each program should process
+    # there are multiple "programs" processing data (a program is a unique instantiation of this kernel)
+    # programs can be defined along multiple dimensions when the inputs have multiple dimensions
+    # this op is 1D so axis=0 is the only option, but bigger operations later may define pid as a tuple
     # here we identify which program we are:
-    pid = tl.program_id(axis=0) # 1d launch grid for the vector so axis is 0
-    # this program will process inputs that are offset from the initial data
-    # for instance, for a vector of length 256 and block_size 64, the programs
-    #   would each access the elements [0:64, 64:128, 128:192, 192:256]
+    pid = tl.program_id(axis=0) 
+        # Each program instance gets a unique ID along the specified axis
+        # For a vector of length 256 and BLOCK_SIZE=64:
+        # pid=0 processes elements [0:64]
+        # pid=1 processes elements [64:128]
+        # pid=2 processes elements [128:192]
+        # pid=3 processes elements [192:256]
+
+    # this program will process inputs that are offset from the initial data (^ described above)
     # note that offsets is a list of pointers
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
     # create a mask to guard memory operations against out-of-bounds accesses
     mask = offsets < n_elements
-    # load x and y from DRAM, masking out any extra elements in case the input
-    #   is not a multiple of block size
+
+    # load x and y from DRAM (global GPU memory) into SRAM (on-chip memory)
+    # SRAM is much faster but limited in size
+    # The mask ensures we don't access memory beyond the vector's end
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
+
+    # perform the operation on SRAM
+    # triton has its own internal definitions of all the basic ops
     output = x + y
-    # write x + y back to DRAM
+
+    # write back to DRAM, being sure to mask to avoid out-of-bounds accesses
     tl.store(output_ptr + offsets, output, mask=mask)
 
 def add(x: torch.Tensor, y: torch.Tensor):
@@ -41,24 +53,33 @@ def add(x: torch.Tensor, y: torch.Tensor):
     '''
     # preallocating the output
     output = torch.empty_like(x)
+
+    # Ensures all tensors are on the same GPU device
+    # This is crucial because Triton kernels can't automatically move data between devices
     assert x.device == DEVICE and y.device == DEVICE and output.device == DEVICE,\
         f'DEVICE: {DEVICE}, x.device: {x.device}, y.device: {y.device}, output.device: {output.device}'
+    
+    # getting length of the vectors
     n_elements = output.numel()
-    # the SPMD (what does that acronym stand for??) denotes the number of kernel
-    #   instances that run in parallel
+
+    # the SPMD (single program, multiple data) denotes the number of kernel instances that run in parallel
     # it can be either Tuple[int] or Callable(metaparameters) -> Tuple[int]
     # in this case, we use a 1D grid where the size is the number of blocks:
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-        # so 'BLOCK_SIZE' is a parameter to be passed into meta()
-        # and i guess triton.cdiv just figures out how many chunks and provides them like a range
-        # then meta() returns a Tuple
-    # NOTE:
-    #   - each torch.tensor object is implicitly converted into a pointer to its first element
-    #   - `triton.jit`'ed functionis can be indexed with a launch grid to obtain a callable GPU kernel
-    #   - don't forget to pass meta-paramters as keyword arguments (<-???)
+        # so 'BLOCK_SIZE' is a parameter to be passed into meta() at compile-time, not runtime
+        # triton.cdiv is ceiling division
+        # then meta() returns a Tuple with the number of kernel programs we want to instantiate at once
+        #   which are compile-time constants
+    
+    # `triton.jit`'ed functionis can be indexed with a launch grid to obtain a callable GPU kernel
     add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
-    # we return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, 
-    #   the kernel is still running asynchronously at this point
+        # BLOCK_SIZE of 1024 is a common heuristic choice because:
+        # It's a power of 2 (efficient for memory access patterns)
+        # It's large enough to hide memory latency
+        # It's small enough to allow multiple blocks to run concurrently on a GPU
+    
+    # the kernel writes to the output in-place rather than having to return anything
+    # once all the kernel programs have finished running then the output gets returned here
     return output
 
 # we can now use the above function to comput ethe element-wise sum of two torch.tensor objects
@@ -97,5 +118,10 @@ def benchmark(size, provider):
     if provider == 'triton':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: add(x, y), quantiles=quantiles)
     gbps = lambda ms: 3 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+        # 3 = number of memory operations (2 reads + 1 write)
+        # x.numel() = number of elements
+        # x.element_size() = bytes per element (4 for float32)
+        # 1e-9 converts bytes to GB
+        # ms * 1e-3 converts milliseconds to seconds
     return gbps(ms), gbps(max_ms), gbps(min_ms)
 benchmark.run(print_data=True, save_path='./benchmark_results/') # show_plots=True, 

@@ -1,7 +1,7 @@
 # autograd_engine_tutorial
 the plan for this repo is to create tutorials on autograd engines for three levels of difficulty:
 
-|                   |                                                                                                                                                                    | micrograd            | minigrad             | autograd (Triton) | autograd<br>(CUDA)     |
+|                   |                                                                                                                                                                    | micrograd            | minigrad             | autograd<br>(Triton) | autograd<br>(CUDA)     |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- | -------------------- | ----------------- | ---------------------- |
 |                   | difficulty level                                                                                                                                                   | beginner             | intermediate         | advanced          | advanced               |
 |                   | time commitment                                                                                                                                                    | medium               | small                | large             | large                  |
