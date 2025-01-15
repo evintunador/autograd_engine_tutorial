@@ -6,44 +6,72 @@ DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
 @triton.jit
 def _naive_matmul_kernel(
-    a_ptr, b_ptr, c_ptr,
-    m, n, k,
-    stride_am, stride_ak, 
-    stride_bk, stride_bn,
+    a_ptr, b_ptr, c_ptr, # pointers to first element of the respective tensors
+    m, n, k, # columns and rows
+    stride_am, stride_ak, # number of location steps to jump in order to move to the next entry in that dimension
+    stride_bk, stride_bn, # ex: increase b_ptr by stride_bk to get the element one row down (B has K rows)
     stride_cm, stride_cn,
-    # meta-parameters
+    # meta-parameters; solidified at compiletime rather than runtime 
     block_size_m: tl.constexpr, block_size_n: tl.constexpr, block_size_k: tl.constexpr,
     ACTIVATION: tl.constexpr
 ):
+    # figuring out which program we are
     program_id_m, program_id_n = tl.program_id(0), tl.program_id(1)
-    # chunks along m/n/k dimensions
-    rm = program_id_m * block_size_m + tl.arange(0, block_size_m)
-    rn = program_id_n * block_size_n + tl.arange(0, block_size_n)
-    rk = tl.arange(0, block_size_k)
-    # relevant offsets of a, b
-    offsets_a = a_ptr + rm.expand_dims(1) * stride_am + rk.expand_dims(0) * stride_ak
-    offsets_b = b_ptr + rk.expand_dims(1) * stride_bk + rn.expand_dims(0) * stride_bn
 
-    # initialize and iteratively update accumulator
-    accumulator = tl.zeros((block_size_m, block_size_n), dtype=tl.float32)
-    mask = (rm.expand_dims(1) < m) & (rn.expand_dims(0) < n)
-    for _ in range(0, k, block_size_k):
-        # todo umer: don't we need mask when loading a & b?
-        a = tl.load(offsets_a, mask=mask)
+    # chunks along m/n/k dimensions (in the case of m & n, it's with respect to the desired output location on c?)
+    chunk_m = program_id_m * block_size_m + tl.arange(0, block_size_m)
+    chunk_n = program_id_n * block_size_n + tl.arange(0, block_size_n)
+    chunk_k = tl.arange(0, block_size_k)
+
+    # relevant offsets of a and b
+    offsets_a = a_ptr + chunk_m.expand_dims(1) * stride_am + chunk_k.expand_dims(0) * stride_ak
+    offsets_b = b_ptr + chunk_k.expand_dims(1) * stride_bk + chunk_n.expand_dims(0) * stride_bn
+        # expand_dims(1) turns [,,,] into [[],[],[]] 
+        # expand_dims(0) turns [,,,] into [[,,,]]
+        # creates 2D indices where top-left is lowest number, bottom-right is highest, and 
+        # change each direction is determined by stride length of that dimension
+
+    # make a mask to prevent utilizing threads that go out-of-bounds of the matrix's dimensions
+    mask = (chunk_m.expand_dims(1) < m) & (chunk_n.expand_dims(0) < n)
+
+    # initialize accumulator
+    accumulator = tl.zeros((block_size_m, block_size_n), dtype=tl.float32) # put straight into SRAM upon initialization
+            # to understand why we accumulate, see # TODO: put file path to ipad screenshot here
+
+    # iteratively update the accumulator
+    for _ in range(0, k, block_size_k): # iterate from 0 to k-1 with jumps of block_size_k
+        # load inputs into SRAM
+        a = tl.load(offsets_a, mask=mask) # mask prevents loading
         b = tl.load(offsets_b, mask=mask)
-        accumulator += tl.dot(a, b)#, allow_tf32=False) # matmul in block ; Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
+
+        # do the actual operation
+        accumulator += tl.dot(a, b)
+            # unlike CUDA which works entry-wise, Triton lets us think in terms of vector and matrix-wise operations
+            # you'd assume .dot is a vector dot product but remember a & b are of shape (block_size_m, block_size_k)
+            #  and (block_size_k, block_size_m) so really it itself is a matmul. don't ask me why Triton is misnaming the op
+        
         # increase offets, so next iteration loads next chunks
         offsets_a += block_size_k * stride_ak
         offsets_b += block_size_k * stride_bk
+            # notice that we move each offset only along the k dimension
+            # so we started in the top-left corner and are now moving offsets_a to the right and offsets_b downward
+            # again see # TODO: put file path to ipad screenshot here
 
     # you can fuse arbitrary activation functions here while the accumulator is still in FP32
     if ACTIVATION == "leaky_relu":
         accumulator = leaky_relu(accumulator)
+    # because ACTIVATION is determined at compile-time rather than run-time, we dont' actually have to worry about
+    #  the O(1) operation of running the if statement every time the kernel is called
+
+    # the accumulation happened in tl.float32 but we save back to DRAM in tl.float16 to save memory
     accumulator = accumulator.to(tl.float16)
 
     # find the desired location for this chunk of c and store it there
-    c_chunk_ptr = c_ptr + rm.expand_dims(1) * stride_cm + rn.expand_dims(0) * stride_cn
-    tl.store(c_chunk_ptr, accumulator, mask=mask)
+    c_chunk_ptrs = c_ptr + chunk_m.expand_dims(1) * stride_cm + chunk_n.expand_dims(0) * stride_cn
+
+    # store accumulated result back onto relevant part of c in DRAM
+    tl.store(c_chunk_ptrs, accumulator, mask=mask)
+        # ofc making sure not to write to entries outside the bounds of our dimension so we use the mask
 
 # we can fuse a nonlinearity (here `leaky_relu`) by providing it as an `ACTIVATION` 
 #  meta-parameter in `_naive_matmul_kernel`
