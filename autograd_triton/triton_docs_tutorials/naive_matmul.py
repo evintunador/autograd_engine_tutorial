@@ -11,7 +11,9 @@ def _naive_matmul_kernel(
     stride_am, stride_ak, 
     stride_bk, stride_bn,
     stride_cm, stride_cn,
-    block_size_m: tl.constexpr, block_size_n: tl.constexpr, block_size_k: tl.constexpr
+    # meta-parameters
+    block_size_m: tl.constexpr, block_size_n: tl.constexpr, block_size_k: tl.constexpr,
+    ACTIVATION: tl.constexpr
 ):
     program_id_m, program_id_n = tl.program_id(0), tl.program_id(1)
     # chunks along m/n/k dimensions
@@ -21,33 +23,60 @@ def _naive_matmul_kernel(
     # relevant offsets of a, b
     offsets_a = a_ptr + rm.expand_dims(1) * stride_am + rk.expand_dims(0) * stride_ak
     offsets_b = b_ptr + rk.expand_dims(1) * stride_bk + rn.expand_dims(0) * stride_bn
+
     # initialize and iteratively update accumulator
-    acc = tl.zeros((block_size_m, block_size_n), dtype=tl.float32)
+    accumulator = tl.zeros((block_size_m, block_size_n), dtype=tl.float32)
     mask = (rm.expand_dims(1) < m) & (rn.expand_dims(0) < n)
     for _ in range(0, k, block_size_k):
         # todo umer: don't we need mask when loading a & b?
         a = tl.load(offsets_a, mask=mask)
         b = tl.load(offsets_b, mask=mask)
-        acc += tl.dot(a, b, allow_tf32=False) # matmul in block ; Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
+        accumulator += tl.dot(a, b)#, allow_tf32=False) # matmul in block ; Weirdness: allow_tf32 must be set to False for older GPUs, otherwise won't compile
         # increase offets, so next iteration loads next chunks
         offsets_a += block_size_k * stride_ak
         offsets_b += block_size_k * stride_bk
-    c_chunk_ptr = c_ptr + rm.expand_dims(1) * stride_cm + rn.expand_dims(0) * stride_cn
-    tl.store(c_chunk_ptr, acc, mask=mask)
 
-def naive_matmul(a, b, block_size=16):
+    # you can fuse arbitrary activation functions here while the accumulator is still in FP32
+    if ACTIVATION == "leaky_relu":
+        accumulator = leaky_relu(accumulator)
+    accumulator = accumulator.to(tl.float16)
+
+    # find the desired location for this chunk of c and store it there
+    c_chunk_ptr = c_ptr + rm.expand_dims(1) * stride_cm + rn.expand_dims(0) * stride_cn
+    tl.store(c_chunk_ptr, accumulator, mask=mask)
+
+# we can fuse a nonlinearity (here `leaky_relu`) by providing it as an `ACTIVATION` 
+#  meta-parameter in `_naive_matmul_kernel`
+@triton.jit
+def leaky_relu(x):
+    return tl.where(x >= 0, x, 0.01 * x)
+
+def naive_matmul(a, b, block_size=64, activation=""): 
+    # you may need to lower block_size if you get an SRAM error. in `matmul.py` we learn how to autotune it
+    
+    # check constraints
     assert a.ndim == b.ndim == 2, "only supports matrices, not vectors or tensors"
     assert a.shape[1] == b.shape[0], "matrix dims not compatible for matmul"
+    assert a.is_contiguous(), "matrix A must be contiguous" # Returns True if tensor is contiguous in memory
+        # i think this means that all elements are lined up back-to-back without interruption
+        # needs to be true so that our indexing makes sense
+
+    # get dimesion lengths
     (m, k), (_, n) = a.shape, b.shape
+
+    # allocates output
     c = torch.empty((m, n), device=a.device, dtype=torch.float16)
-    grid = lambda meta: (triton.cdiv(m, meta['bm']),  triton.cdiv(n, meta['bn']))
+    
+    # 2D launch kernel, meaning we parallelize across both rows and columns (called "row-major ordering")
+    grid = lambda meta: (triton.cdiv(m, meta['block_size_m']),  triton.cdiv(n, meta['block_size_n']))
     _naive_matmul_kernel[grid](
         a, b, c,
         m, n, k,
-        a.stride(0), a.stride(1),
+        a.stride(0), a.stride(1), # the jump necessary to go from one element to the next one in that dimension
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-        bm=block_size, bn=block_size, bk=block_size
+        block_size_m=block_size, block_size_n=block_size, block_size_k=block_size,
+        ACTIVATION=activation # not used by default since "" is being passed in
     )
     return c
 
@@ -74,7 +103,8 @@ configs = [
         line_names = ["cuBLAS", "Triton"],
         styles = [("green", "-"), ("blue", "-")],
         ylabel = "TFLOPS", 
-        plot_name = "naive_matmul-performance"
+        plot_name = "naive_matmul-performance",
+        args={}, # values for funciton arguments not in x_names and y_names; need it even if not using
     )
 ]
 @triton.testing.perf_report(configs)

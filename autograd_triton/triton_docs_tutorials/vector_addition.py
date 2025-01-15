@@ -108,7 +108,7 @@ print(f'The max diff bw torch & triton is: '
         styles=[('blue', '-'), ('green', '-')],
         ylabel='GB/s', # label name for y-axis
         plot_name='vector-add-performance', # also used as file name for saving plot
-        args={}, # values for funciton arguments not in x_names and y_names
+        args={}, # values for funciton arguments not in x_names and y_names; need it even if not using
     ))
 def benchmark(size, provider):
     x = torch.rand(size, device=DEVICE, dtype=torch.float32)

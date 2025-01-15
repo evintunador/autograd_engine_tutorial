@@ -97,7 +97,7 @@ def _softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and ou
 # and now we'll create a helper function that enqueues the kernel and its meta-arguments
 #   for any given input tensor. these properties will be used in the helper function to calculate
 #   how many parallel programs we can run efficiently
-properties = driver.active.utils.get_device_properties(DEVICE.index)
+properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
 NUM_SM = properties["multiprocessor_count"] 
     # each Streaming Multi-processor (SM) is like a mini-processor that can run multiple programs
 NUM_REGS = properties["max_num_regs"] # registers are the fastest memory on the GPU
@@ -138,13 +138,13 @@ def softmax(x):
     # allocate output
     y = torch.empty_like(x)
 
-    # pre-compiles kernel and tells us how many registers and how much shared memory it needs
+    # .warmup() pre-compiles kernel and tells us how many registers and how much shared memory it needs
     kernel = _softmax_kernel.warmup(x, y,
                                     x.stride(0), y.stride(0),
                                     n_rows, n_cols,
                                     BLOCK_SIZE=BLOCK_SIZE,
                                     num_stages=num_stages,
-                                    num_warps=num_warps, # @triton.jit has arguments we didnt' define
+                                    num_warps=num_warps, # @triton.jit has extra arguments we didnt' define
                                     grid=(1,))
     kernel._init_handles()
     n_regs = kernel.n_regs
@@ -185,8 +185,6 @@ def softmax(x):
         x, y,
         x.stride(0), y.stride(0),
         n_rows, n_cols,
-        num_warps=num_warps,
-        BLOCK_SIZE=BLOCK_SIZE
     )
     return y
 

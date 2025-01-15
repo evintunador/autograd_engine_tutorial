@@ -21,52 +21,39 @@ import triton.language as tl
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
-def is_cuda():
-    return triton.runtime.driver.active.get_current_target().backend == "cuda"
-
 # this is just setting up a bunch of different potential config files that we'll choose from later based
-# on how well they perform on our specific GPU
-def get_cuda_autotune_conig(): # why is it a function instead of just storing a list tho?
-    return [
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3,
-                      num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4,
-                      num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
-                      num_warps=2)
-    ]
+# on how well they perform on our specific GPU. Triton will figure out which to use for us. They're all values chosen
+# heuristically, bot notice everything is a multiple of 32 in sticking w/ the number of threads in a warp
+autotude_configs = [
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+    triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2)
+]
 
 # `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator which consumes
 #   - a list of `triton.Config` objects that define different configs of meta-parameters and compilation options
 #   - an auto-tuning *key* whose change in values will trigger evaluation of all the provided configs
-@triton.autotune(configs = get_autotune_config(), key=['M', 'N', 'K'])
+@triton.autotune(configs = autotude_configs, key=['M', 'N', 'K'])
 @triton.jit
-def matmul_kernel(a_ptr, b_ptr, c_ptr, # pointers to matrices
-                M, N, K, # matrix dimensions
-                stride_am, stride_ak, # how much to increase the ptr by when moving by 1 element
-                stride_bk, stride_bn, # ex. increase a_ptr by stride_am to get the element one row down (A has M rows)
-                stride_cm, stride_cn,
-                # meta-parameters
-                BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-                GROUP_SIZE_M: tl.constexpr,
-                ACTIVATION: tl.constexpr):
-    '''
-    kernel for computing the matmul A @ B = C
-    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
-    '''
+def _matmul_kernel(
+    a_ptr, b_ptr, c_ptr, # pointers to matrices
+    M, N, K, # matrix dimensions
+    stride_am, stride_ak, # how much to increase the ptr by when moving by 1 element along that dimension
+    stride_bk, stride_bn, # ex: increase b_ptr by stride_bk to get the element one row down (B has K rows)
+    stride_cm, stride_cn,
+    # meta-parameters
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    ACTIVATION: tl.constexpr
+):
     # first we map program ids (pids) to the block of C it should compute
-    # this is done in grouped ordering to promote L2 data reuse
-    # see https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+    # this is done in grouped ordering to promote SRAM data reuse
+    # for a visual see https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -101,19 +88,21 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, # pointers to matrices
         # advance the ptrs to the next K block
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
-    # you can fuse arbitrary activation functions here whil ehte accumulator is still in FP32
+
+    # you can fuse arbitrary activation functions here while the accumulator is still in FP32
     if ACTIVATION == "leaky_relu":
         accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.float16)
+    accumulator = accumulator.to(tl.float16)
 
     # write back the block of the output matrix C with masks
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
 
-# we can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `matmul_kernel`
+# we can fuse a nonlinearity (here `leaky_relu`) by providing it as an `ACTIVATION` 
+#  meta-parameter in `_naive_matmul_kernel`
 @triton.jit
 def leaky_relu(x):
     return tl.where(x >= 0, x, 0.01 * x)
@@ -121,21 +110,27 @@ def leaky_relu(x):
 # now our wrapper function is relatively simple compared to the previous two lessons
 def matmul(a, b, activation=""):
     # check constraints
+    assert a.ndim == b.ndim == 2, "only supports matrices, not vectors or tensors"
     assert a.shape[1] == b.shape[0], "incompatible dimensions"
-    assert a.is_contiguous(), "matrix A must be contiguous" # <- what does contiguous mean in this context?
-    M, K = a.shape
-    K, N = b.shape
+    assert a.is_contiguous(), "matrix A must be contiguous" # Returns True if tensor is contiguous in memory
+        # i think this means that all elements are lined up back-to-back without interruption
+        # needs to be true so that our indexing makes sense
+    
+    # get dimesion lengths
+    (m, k), (_, n) = a.shape, b.shape
+
     # allocates output
-    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+    c = torch.empty((m, n), device=a.device, dtype=torch.float16)
+    
     # 1D launch kernel where each block gets its own program
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
-    matmul_kernel[grid](
+    grid = lambda meta: (triton.cdiv(m, meta['BLOCK_SIZE_M']) * triton.cdiv(n, meta['BLOCK_SIZE_N']), )
+    _matmul_kernel[grid](
         a, b, c,
-        M, N, K,
-        a.stride(0), a.stride(1),
+        m, n, k,
+        a.stride(0), a.stride(1), # the jump necessary to go from one element to the next one in that dimension
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-        ACTIVATION=activation
+        ACTIVATION=activation # not used by default since "" is being passed in
     )
     return c
 
@@ -145,8 +140,8 @@ a = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
 b = torch.randn((512, 512), device=DEVICE, dtype=torch.float16)
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
-print(f"triton_output_with_fp16_inputs={triton_output}")
-print(f"torch_output_with_fp16_inputs={torch_output}")
+print(f"triton_output={triton_output}")
+print(f"torch_output={torch_output}")
 if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
@@ -163,7 +158,7 @@ configs = [
         styles = [("green", "-"), ("blue", "-")],
         ylabel = "TFLOPS", 
         plot_name = "matmul-performance",
-        #args = {"fp8_inputs": False}
+        args={}, # values for funciton arguments not in x_names and y_names; need it even if not using
     )
 ]
 @triton.testing.perf_report(configs)
