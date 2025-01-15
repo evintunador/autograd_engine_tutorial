@@ -167,7 +167,7 @@ configs = [
     )
 ]
 @triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider, fp8_inputs):
+def benchmark(M, N, K, provider):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
     b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
     quantiles = [0.5, 0.2, 0.8]

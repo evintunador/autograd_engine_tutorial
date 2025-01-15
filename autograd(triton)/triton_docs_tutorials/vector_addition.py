@@ -12,21 +12,22 @@ def add_kernel(x_ptr, y_ptr,# pointers to input vectors
                     # each torch.tensor object is implicitly converted into a pointer to its first element
                n_elements, # size of vector
                BLOCK_SIZE: tl.constexpr): # number of elements each program should process
+    # tl.constexpr is a type that tells the compiler that the value must be known at compile-time (not runtime)
     # there are multiple "programs" processing data (a program is a unique instantiation of this kernel)
     # programs can be defined along multiple dimensions when the inputs have multiple dimensions
-    # this op is 1D so axis=0 is the only option, but bigger operations later may define pid as a tuple
+    # this op is 1D so axis=0 is the only option, but bigger operations later may define program_id as a tuple
     # here we identify which program we are:
-    pid = tl.program_id(axis=0) 
+    program_id = tl.program_id(axis=0) 
         # Each program instance gets a unique ID along the specified axis
         # For a vector of length 256 and BLOCK_SIZE=64:
-        # pid=0 processes elements [0:64]
-        # pid=1 processes elements [64:128]
-        # pid=2 processes elements [128:192]
-        # pid=3 processes elements [192:256]
+        # program_id=0 processes elements [0:64]
+        # program_id=1 processes elements [64:128]
+        # program_id=2 processes elements [128:192]
+        # program_id=3 processes elements [192:256]
 
     # this program will process inputs that are offset from the initial data (^ described above)
-    # note that offsets is a list of pointers
-    block_start = pid * BLOCK_SIZE
+    # note that offsets is a list of pointers a la [0, 1, 2, ...., 62, 63]
+    block_start = program_id * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
     # create a mask to guard memory operations against out-of-bounds accesses
@@ -60,14 +61,14 @@ def add(x: torch.Tensor, y: torch.Tensor):
         f'DEVICE: {DEVICE}, x.device: {x.device}, y.device: {y.device}, output.device: {output.device}'
     
     # getting length of the vectors
-    n_elements = output.numel()
-
-    # the SPMD (single program, multiple data) denotes the number of kernel instances that run in parallel
+    n_elements = output.numel() # .numel() returns total number of entries in tensor of any shape
+ 
+    # grid defines the number of kernel instances that run in parallel
     # it can be either Tuple[int] or Callable(metaparameters) -> Tuple[int]
     # in this case, we use a 1D grid where the size is the number of blocks:
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), ) 
         # so 'BLOCK_SIZE' is a parameter to be passed into meta() at compile-time, not runtime
-        # triton.cdiv is ceiling division
+        # triton.cdiv = ceil(n_elements / meta['BLOCK_SIZE'])
         # then meta() returns a Tuple with the number of kernel programs we want to instantiate at once
         #   which are compile-time constants
     

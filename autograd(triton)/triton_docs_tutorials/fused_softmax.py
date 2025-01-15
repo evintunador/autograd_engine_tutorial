@@ -5,7 +5,6 @@
 import torch
 import triton
 import triton.language as tl
-from triton.runtime import driver # for getting info about our GPU
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
@@ -25,9 +24,9 @@ def naive_softmax(x):
     # read MN elements; write M elements
     denominator = numerator.sum(dim=1)
     # read MN + M elements; write MN elements
-    ret = numerator / denominator[:, None]
+    out = numerator / denominator[:, None]
     # in total 8MN + 4M (read 5MN + 2M elements; wrote 3MN + 2M elements)
-    return ret
+    return out
 
 # we'd prefer to have a custom "fused" kernel that only reads x from DRAM once and does all the necessary
 # computations on SRAM as opposed to repeatedly reading & writing to DRAM
@@ -37,13 +36,13 @@ def naive_softmax(x):
 
 # our fused softmax kernel works as follows:
 # each program (individual call of the kernel) loads a set of rows of the input matrix X which are
-#   strided by number of programs, normalizes it and writes back the result to the output Y
+#   strided by number of programs, softmaxes it and writes back the result to the output Y
 
 # note an important limitation of Triton is that each block must have a power-of-two number of
 #   elements, so we need to internally "pad" each row and guard the memory operations properly
 
 @triton.jit # this decorator tells Triton to compile this function into GPU code
-def softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and output data
+def _softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and output data
                     input_row_stride, output_row_stride, # number of elements to skip when moving to next row
                     n_rows, n_cols, # matrix dimensions
                     BLOCK_SIZE: tl.constexpr, # power-of-2 size for processing blocks
@@ -84,7 +83,7 @@ def softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and out
             # all the invalid -inf values remain -inf when we subtract the max
         # note that exponentiation in Triton is fast but approximate
         numerator = tl.exp(row_minus_max)
-            # all the -inf values get set to 0
+            # all the -inf values get set to 0 since exp(-inf)=0
         denominator = tl.sum(numerator, axis=0)
             # all the invalid 0 values do get summed but don't matter since they're 0
         softmax_output = numerator / denominator
@@ -99,15 +98,16 @@ def softmax_kernel(input_ptr, output_ptr, # raw memory pointers to input and out
 #   for any given input tensor. these properties will be used in the helper function to calculate
 #   how many parallel programs we can run efficiently
 properties = driver.active.utils.get_device_properties(DEVICE.index)
-NUM_SM = properties["multiprocessor_count"] # each SM is like a mini-processor that can run multiple programs
+NUM_SM = properties["multiprocessor_count"] 
+    # each Streaming Multi-processor (SM) is like a mini-processor that can run multiple programs
 NUM_REGS = properties["max_num_regs"] # registers are the fastest memory on the GPU
     # each SM has a limited number of registers; 
     # programs share these registers, so using too many per program limits parallelism
 TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # this is total SRAM; each SM has a fixed amount of SRAM
 WARP_SIZE = properties["warpSize"]
     # a warp is a group of threads that execute together; usually 32 on nvidia GPUs and 64 on AMD
-target = triton.runtime.driver.active.get_current_target()
-kernels = {} # this would be used for caching compiled kernels if we were running multiple operations
+target = triton.runtime.driver.active.get_current_target() # TODO
+kernels = {} # this would be used for caching compiled kernels if we were running multiple operations # TODO
 
 def softmax(x):
     n_rows, n_cols = x.shape
@@ -118,10 +118,14 @@ def softmax(x):
 
     # another trick we can use is to ask the compiler to use more threads per row by
     #   increasing the number of warps (`num_warps`) over which each row is distributed.
-    # for now setting to 8 is just a heuristic
+    # for now these settings are just a heuristic
     # you will see in the next tutorial how to auto-tune this value in a more natural way
     #   so you don't have to come up with manual heuristics yourself
-    num_warps = 8
+    num_warps = 4
+    if BLOCK_SIZE >= 2048:
+        num_warps = 8
+    if BLOCK_SIZE >= 4096:
+        num_warps = 16
 
     # number of software pipelining stages, meaning how we let the GPU do multiple things at once
     # so with 2 stages we can have one do the operation while the other is loading the next operands into memory
@@ -135,7 +139,7 @@ def softmax(x):
     y = torch.empty_like(x)
 
     # pre-compiles kernel and tells us how many registers and how much shared memory it needs
-    kernel = softmax_kernel.warmup(x, y,
+    kernel = _softmax_kernel.warmup(x, y,
                                     x.stride(0), y.stride(0),
                                     n_rows, n_cols,
                                     BLOCK_SIZE=BLOCK_SIZE,
@@ -152,10 +156,10 @@ def softmax(x):
         # each program uses
             # n_regs per register thread (eg 32)
             # WARP_SIZE threads per warp (32 on Nvidia)
-            # num_warps warps per program (8 in our case with the aforementioned heuristic)
+            # num_warps warps per program (4, 8, or 16 in our case with the aforementioned heuristic)
         # so each program needs n_regs * WARP_SIZE * num_warps registers total
         # therefore we can fit reg_occupancy programs per SM
-        # ex. 65536 // (32 * 32 * 8) = 8 programs per SM
+        # ex. 65536 // (32 * 32 * 8) = 8 programs per SM (assuming num_warps=8)
     # shared memory-based occupancy
     sram_occupancy = TOTAL_SRAM_PER_SM // sram_needed_per_program
     # determines how many programs can run per SM based on register usage and shared memory usage
@@ -180,7 +184,9 @@ def softmax(x):
     kernel[grid_config](
         x, y,
         x.stride(0), y.stride(0),
-        n_rows, n_cols
+        n_rows, n_cols,
+        num_warps=num_warps,
+        BLOCK_SIZE=BLOCK_SIZE
     )
     return y
 
