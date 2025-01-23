@@ -53,9 +53,19 @@ You might be asking: why are we using Triton instead of CUDA? I'm open to the id
 Personally I'm on a Mac so i plan on doing all my work on a cloud provider like [lambdalabs](https://lambdalabs.com) anyways so the windows availability didn't matter much to me. That and I highly value the pythonic syntax and potential future widespread compatibility. 
 
 ##### TODO:
-- [ ] begin learning Triton
-	- [ ] realize i'm in way over my head
-		- [ ] abandon project lmao
+- [x] begin learning Triton
+	- [ ] ~~realize i'm in way over my head~~ *PSYC DAT SHIT WAS EASY*
+		- [ ] ~~abandon project lmao~~
+- [ ] engine.py
+	- [ ] TritonTensor class
+		- [x] __init__
+		- [x] __add__
+			- [x] figure out broadcasting
+			- [x] fwd kernel
+			- [x] bwd kernel
+		- [ ] the rest of the ops
+	- [x] testing
+- [x] benchmarking
 
 ## autograd (CUDA)
 I'll consider building this if 1) the other three perform well 2) people are interested and 3) i become a masochist
