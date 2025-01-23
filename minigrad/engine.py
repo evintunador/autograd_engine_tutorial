@@ -40,6 +40,8 @@ class Tensor:
         return f"Tensor:\n({self.data})\nGrad:\n({self.grad})"
 
     def __add__(self, other): # entry-wise addition
+        """very limited support for different tensor shapes"""
+        
         # Ensure other is a Tensor; also takes advantage of __init__'s type assertions
         other = other if isinstance(other, Tensor) else Tensor(other, requires_grad=False)
 
