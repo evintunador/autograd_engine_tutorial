@@ -128,7 +128,7 @@ class Tensor:
     def zero_grad(self):
         self.grad = torch.zeros_like(self.data) if self.requires_grad else None
 
-    def backward(self):
+    def backward(self, grad: None):
         """
         Run backpropagation starting from this tensor. 
         Typically called on a scalar loss Tensor.
@@ -142,7 +142,7 @@ class Tensor:
                     build_topo(child)
                 topo.append(v)
         build_topo(self)
-        self.grad = torch.ones_like(self.grad)
+        self.grad = torch.ones_like(self.grad) if grad is None else grad
         for node in reversed(topo):
             node._backward()
 
