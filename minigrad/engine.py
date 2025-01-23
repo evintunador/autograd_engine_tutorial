@@ -21,12 +21,16 @@ class Tensor:
         
         self.data = data
         
+        # Store tensor metadata
         self.shape = self.data.shape
         self.ndim = self.data.ndim
         self.dtype = self.data.dtype
         
+        # Gradient-related attributes
         self.requires_grad = requires_grad
         self.grad = np.zeros_like(data) if requires_grad else None
+
+        # Autograd graph information
         self._prev = set(_children)
         self._backward = lambda: None  # function to compute local gradient updates
 
