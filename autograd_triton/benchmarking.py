@@ -18,21 +18,19 @@ for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         addition_configs.append(
             triton.testing.Benchmark(
-                x_names=['size'],  # Argument names to vary
-                x_vals=[2**i for i in range(8, 14, 1)],  # Different input sizes
+                x_names=['total_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
                 ylabel='TFLOPS',  # Label name for y-axis
+                xlabel="Total Elements (millions)", # Label name for x-axis
                 plot_name=f'add_{mode}_broadcasting={broadcasting}',  # Name for plot
-                args={
-                    "mode": mode,
-                    "broadcasting": broadcasting,
-                },
+                args={"mode": mode, "broadcasting": broadcasting,},
             ))
 @triton.testing.perf_report(addition_configs)
-def benchmark_addition(size, provider,
+def benchmark_addition(total_elements, provider,
                        triton_fn, torch_fn,
                        input_shapes_fn,
                        mode,
@@ -42,7 +40,7 @@ def benchmark_addition(size, provider,
     Benchmark Triton addition against PyTorch.
     
     Args:
-        size: Size parameter to generate input shapes
+        total_elements: Total number of elements in the tensors
         provider: 'torch' or 'triton'
         triton_fn: Triton implementation
         torch_fn: PyTorch implementation
@@ -50,7 +48,7 @@ def benchmark_addition(size, provider,
         device: Device to run on
     """
     # Generate input shapes and data
-    shapes = input_shapes_fn(size, broadcasting)
+    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
     inputs = [torch.randn(shape, device=device) for shape in shapes]
     
     # Select implementation
@@ -74,28 +72,26 @@ for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         sub_configs.append(
             triton.testing.Benchmark(
-                x_names=['size'],  # Argument names to vary
-                x_vals=[2**i for i in range(8, 14, 1)],  # Different input sizes
+                x_names=['total_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
-                line_names=['PyTorch', 'Triton'],  # Label for different lines
+                line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='TFLOPS',
-                plot_name=f'sub_{mode}_broadcasting={broadcasting}',
-                args={
-                    "mode": mode,
-                    "broadcasting": broadcasting,
-                },
+                ylabel='TFLOPS',  # Label name for y-axis
+                xlabel="Total Elements (millions)", # Label name for x-axis
+                plot_name=f'sub_{mode}_broadcasting={broadcasting}',  # Name for plot
+                args={"mode": mode, "broadcasting": broadcasting,},
             ))
 
 @triton.testing.perf_report(sub_configs)
-def benchmark_sub(size, provider,
+def benchmark_sub(total_elements, provider,
                   triton_fn, torch_fn,
                   input_shapes_fn,
                   mode,
                   broadcasting,
                   device=DEVICE):
-    shapes = input_shapes_fn(size, broadcasting)
+    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
     inputs = [torch.randn(shape, device=device) for shape in shapes]
     
     if provider == 'torch':
@@ -114,28 +110,26 @@ for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         mul_configs.append(
             triton.testing.Benchmark(
-                x_names=['size'],
-                x_vals=[2**i for i in range(8, 14, 1)],
-                line_arg='provider',
-                line_vals=['torch', 'triton'],
-                line_names=['PyTorch', 'Triton'],
-                styles=[('blue', '-'), ('red', '-')],
-                ylabel='TFLOPS',
-                plot_name=f'mul_{mode}_broadcasting={broadcasting}',
-                args={
-                    "mode": mode,
-                    "broadcasting": broadcasting,
-                },
+                x_names=['total_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
+                line_vals=['torch', 'triton'],  # Possible values for line_arg
+                line_names=['PyTorch', 'Triton'],  # Label name for different lines
+                styles=[('blue', '-'), ('red', '-')],  # Line styles
+                ylabel='TFLOPS',  # Label name for y-axis
+                xlabel="Total Elements (millions)", # Label name for x-axis
+                plot_name=f'mul_{mode}_broadcasting={broadcasting}',  # Name for plot
+                args={"mode": mode, "broadcasting": broadcasting,},
             ))
 
 @triton.testing.perf_report(mul_configs)
-def benchmark_mul(size, provider,
+def benchmark_mul(total_elements, provider,
                   triton_fn, torch_fn,
                   input_shapes_fn,
                   mode,
                   broadcasting,
                   device=DEVICE):
-    shapes = input_shapes_fn(size, broadcasting)
+    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
     inputs = [torch.randn(shape, device=device) for shape in shapes]
     
     if provider == 'torch':
@@ -154,28 +148,26 @@ for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         div_configs.append(
             triton.testing.Benchmark(
-                x_names=['size'],
-                x_vals=[2**i for i in range(8, 14, 1)],
-                line_arg='provider',
-                line_vals=['torch', 'triton'],
-                line_names=['PyTorch', 'Triton'],
-                styles=[('blue', '-'), ('red', '-')],
-                ylabel='TFLOPS',
-                plot_name=f'div_{mode}_broadcasting={broadcasting}',
-                args={
-                    "mode": mode,
-                    "broadcasting": broadcasting,
-                },
+                x_names=['total_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
+                line_vals=['torch', 'triton'],  # Possible values for line_arg
+                line_names=['PyTorch', 'Triton'],  # Label name for different lines
+                styles=[('blue', '-'), ('red', '-')],  # Line styles
+                ylabel='TFLOPS',  # Label name for y-axis
+                xlabel="Total Elements (millions)", # Label name for x-axis
+                plot_name=f'div_{mode}_broadcasting={broadcasting}',  # Name for plot
+                args={"mode": mode, "broadcasting": broadcasting,},
             ))
 
 @triton.testing.perf_report(div_configs)
-def benchmark_div(size, provider,
+def benchmark_div(total_elements, provider,
                   triton_fn, torch_fn,
                   input_shapes_fn,
                   mode,
                   broadcasting,
                   device=DEVICE):
-    shapes = input_shapes_fn(size, broadcasting)
+    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
     inputs = [torch.randn(shape, device=device) for shape in shapes]
     
     if provider == 'torch':
@@ -193,7 +185,8 @@ if __name__ == "__main__":
     ### ADDITION
     def triton_add(x, y): return x + y
     def torch_add(x, y): return x + y
-    def add_shapes(size, broadcasting): return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)] 
+    def add_shapes(size, broadcasting): 
+        return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)] 
     benchmark_addition.run(
         print_data=True,
         triton_fn=triton_add,
