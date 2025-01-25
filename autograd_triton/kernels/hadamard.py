@@ -22,12 +22,13 @@ DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 )
 """
 @triton.jit # this decorator tells Triton to compile this function into GPU code
-def add_kernel(
+def binary_op_kernel(
     x_ptr, y_ptr,               # pointers to input vectors (triton converts torch.tensor objects into pointers to their first element)
     output_ptr,                 # ptr to output vector
     n_elements,                 # size of x tensor
     loop_stride,                # size of y tensor
-    BLOCK_SIZE: tl.constexpr    # number of elements each program should process
+    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
+    OP: tl.constexpr,           # the operation to be performed
 ):   
     # tl.constexpr is a type that tells the compiler that the value must be known at compile-time (not runtime)
     # there are multiple "programs" processing data (a program is a unique instantiation of this kernel)
@@ -60,19 +61,33 @@ def add_kernel(
 
     # perform the operation for this block on SRAM
     # triton has its own internal definitions of all the basic ops that deal with the actual entry-wise details
-    output = x + y
+    # The conditional here is on a compile-time constant,
+    # which Triton can “fold” or “inline” so there’s no runtime overhead.
+    # You’ll get a separate compiled kernel per value of OP.
+    if OP == "add":
+        out = x + y
+    elif OP == "sub":
+        out = x - y
+    elif OP == "div":
+        out = x / y
+    elif OP == "mul":
+        out = x * y
+    else:
+        raise ValueError(f"input operation must be either 'add', 'sub', 'div', or 'mul' but isntead got {OP}")
 
     # write back to DRAM, being sure to mask to avoid out-of-bounds accesses
-    tl.store(output_ptr + offsets_x, output, mask = mask_x)
+    tl.store(output_ptr + offsets_x, out, mask = mask_x)
 
 @triton.jit
-def add_backward_kernel(
+def binary_op_backward_kernel(
+    x_ptr, y_ptr,               # pointers to input vectors
     dx_ptr,                     # pointer to first input's gradient, or None if x doesn't require a gradient
     dy_ptr,                     # pointer to second input's gradient, or None if y doesn't require a gradient
     do_ptr,                     # pointer to incoming gradient
     n_elements,                 # total number of elements in x and output tensors
     loop_stride,                # total number of elements in y tensor
     BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
+    OP: tl.constexpr,           # the operation to be performed
 ):
     # Get program ID
     pid = tl.program_id(axis=0)
@@ -87,16 +102,44 @@ def add_backward_kernel(
     mask_x = offsets_x < n_elements
     mask_y = offsets_y < loop_stride
     
-    # For addition, both gradients are simply the output gradient
-    do = tl.load(do_ptr + offsets_x, mask = mask_x)
-    if dx_ptr is not None: # x + y = o -> dx = do
-        # the pre-existing dx
+    # Load incoming gradient do
+    do = tl.load(do_ptr + offsets_x, mask=mask_x)
+    
+    if dx_ptr is not None:
         dx = tl.load(dx_ptr + offsets_x, mask=mask_x)
-        # do our gradient accumulation
-        dx += do
+
+        if OP == "add":
+            dx += do
+        elif OP == "sub":
+            dx += do
+        elif OP == "mul":
+            # y_val must be loaded from y_ptr + offsets_y
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            dx += do * y_val
+        elif OP == "div":
+            # We do x / y => dx = (1 / y) * do
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            dx += do / y_val
+
         tl.store(dx_ptr + offsets_x, dx, mask=mask_x)
-    if dy_ptr is not None: # x + y = o -> dy = do
+    
+    if dy_ptr is not None:
         # if we were to use the same code as above, then in the case of broadcasting the threads would be
         #  overwriting each other. instead, we use atomic_add which uses a locking mechanism to ensure
         #  that only one thread works on a given entry in dy at a time
-        tl.atomic_add(dy_ptr + offsets_y, do, mask=mask_y)
+
+        if OP == "add":
+            tl.atomic_add(dy_ptr + offsets_y, do, mask=mask_y)
+        elif OP == "sub":
+            tl.atomic_add(dy_ptr + offsets_y, -do, mask=mask_y)
+        elif OP == "mul":
+            # y gradient = do * x
+            # load x_ptr + offsets_x
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
+        elif OP == "div":
+            # out = x / y => dy = -(x*do)/y^2
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            partial_dy = -x_val * do / (y_val * y_val)
+            tl.atomic_add(dy_ptr + offsets_y, partial_dy, mask=mask_y)

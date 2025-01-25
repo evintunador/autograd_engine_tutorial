@@ -62,8 +62,8 @@ class TritonTensor:
     def __repr__(self):
         return f"Tensor:\n{self.data}\nGrad:{self.grad}"
     
-    def __add__(self, other):
-        """a simple hadamard addition operation that supports broadcasting of other up to size self
+    def _hadamard(self, other, op):
+        """a simple hadamard (entry-wise) operation that supports broadcasting of other up to size self
         """
         # Ensures all tensors are on the same GPU device
         assert self.device == other.device, \
@@ -97,10 +97,11 @@ class TritonTensor:
         # Define grid based on tensor dimensions
         grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
         # Launch kernel
-        hadamard.add_kernel[grid](
+        hadamard.binary_op_kernel[grid](
             self.data, other.data, output, 
             n_elements, loop_stride,
-            BLOCK_SIZE=1024 # TODO autotune addition kernels
+            BLOCK_SIZE=1024, # TODO autotune addition kernels
+            OP=op
         )
         
         # Wrap output in Tensor with autograd information
@@ -116,10 +117,12 @@ class TritonTensor:
             if not self.requires_grad and not other.requires_grad:
                 pass
 
-            hadamard.add_backward_kernel[grid](
+            hadamard.binary_op_backward_kernel[grid](
+                self.data, other.data,
                 self.grad, other.grad, out.grad, 
                 n_elements, loop_stride,
-                BLOCK_SIZE=1024
+                BLOCK_SIZE=1024,
+                OP=op
             )
             # doesn't return anything because it writes to the self.grad and self.other tensors in-place
 
@@ -127,25 +130,22 @@ class TritonTensor:
         
         return out
 
+    def __add__(self, other):
+        return self._hadamard(other, op='add')
+
     def __mul__(self, other):
-        """Placeholder for element-wise multiplication"""
-        # TODO: Implement Triton kernel for element-wise multiplication
-        raise NotImplementedError("Multiplication kernel not yet implemented")
+        return self._hadamard(other, op='mul')
+
+    def __sub__(self, other):
+        return self._hadamard(other, op='sub')
+
+    def __truediv__(self, other):
+        return self._hadamard(other, op='div')
 
     def __neg__(self):
         """Placeholder for negation"""
         # TODO: Implement Triton kernel for negation
         raise NotImplementedError("Negation kernel not yet implemented")
-
-    def __sub__(self, other):
-        """Placeholder for subtraction"""
-        # TODO: Implement Triton kernel for subtraction
-        raise NotImplementedError("Subtraction kernel not yet implemented")
-
-    def __truediv__(self, other):
-        """Placeholder for element-wise division"""
-        # TODO: Implement Triton kernel for element-wise division
-        raise NotImplementedError("Division kernel not yet implemented")
 
     def __matmul__(self, other):
         """Placeholder for matrix multiplication"""
@@ -319,14 +319,62 @@ if __name__ == "__main__":
     def triton_add(x, y): return x + y
     def torch_add(x, y): return x + y
     test_operation(
-        f"addition ({B}, {N}, {D}) + ({B}, {N}, {D})",
+        f"addition: ({B}, {N}, {D}) + ({B}, {N}, {D})",
         triton_add,
         torch_add,
         [(B, N, D), (B, N, D)]
     )
     test_operation(
-        f"addition with broadcasting ({B}, {N}, {D}) + ({D})",
+        f"addition with broadcasting: ({B}, {N}, {D}) + ({D})",
         triton_add,
         torch_add,
+        [(B, N, D), (D)]
+    )
+
+    ### MULTIPLICATION
+    def triton_mul(x, y): return x * y
+    def torch_mul(x, y): return x * y
+    test_operation(
+        f"multiplication: ({B}, {N}, {D}) * ({B}, {N}, {D})",
+        triton_mul,
+        torch_mul,
+        [(B, N, D), (B, N, D)]
+    )
+    test_operation(
+        f"multiplication with broadcasting: ({B}, {N}, {D}) * ({D})",
+        triton_mul,
+        torch_mul,
+        [(B, N, D), (D)]
+    )
+
+    ### SUBTRACTION
+    def triton_sub(x, y): return x - y
+    def torch_sub(x, y): return x - y
+    test_operation(
+        f"subtraction: ({B}, {N}, {D}) + ({B}, {N}, {D})",
+        triton_sub,
+        torch_sub,
+        [(B, N, D), (B, N, D)]
+    )
+    test_operation(
+        f"subtraction with broadcasting: ({B}, {N}, {D}) + ({D})",
+        triton_sub,
+        torch_sub,
+        [(B, N, D), (D)]
+    )
+
+    ### DIVISION
+    def triton_div(x, y): return x / y
+    def torch_div(x, y): return x / y
+    test_operation(
+        f"division: ({B}, {N}, {D}) + ({B}, {N}, {D})",
+        triton_div,
+        torch_div,
+        [(B, N, D), (B, N, D)]
+    )
+    test_operation(
+        f"division with broadcasting: ({B}, {N}, {D}) + ({D})",
+        triton_div,
+        torch_div,
         [(B, N, D), (D)]
     )
