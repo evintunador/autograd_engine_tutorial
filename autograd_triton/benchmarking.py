@@ -181,55 +181,74 @@ def benchmark_div(total_elements, provider,
     return flops * 1e-12 / (ms * 1e-3)
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run benchmarks for Triton operations')
+    parser.add_argument('--all', action='store_true', help='Run all benchmarks')
+    parser.add_argument('--add', action='store_true', help='Run addition benchmarks')
+    parser.add_argument('--sub', action='store_true', help='Run subtraction benchmarks')
+    parser.add_argument('--mul', action='store_true', help='Run multiplication benchmarks')
+    parser.add_argument('--div', action='store_true', help='Run division benchmarks')
+    
+    args = parser.parse_args()
+    
+    # If no args are provided, print help
+    if not any(vars(args).values()):
+        parser.print_help()
+        exit(0)
+    
+    if args.all or args.add:
+        print("\nRunning addition benchmarks...")
+        def triton_add(x, y): return x + y
+        def torch_add(x, y): return x + y
+        def add_shapes(size, broadcasting): 
+            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)] 
+        benchmark_addition.run(
+            print_data=True,
+            triton_fn=triton_add,
+            torch_fn=torch_add,
+            input_shapes_fn=add_shapes,
+            save_path='./benchmarks/'
+        )
 
-    ### ADDITION
-    def triton_add(x, y): return x + y
-    def torch_add(x, y): return x + y
-    def add_shapes(size, broadcasting): 
-        return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)] 
-    benchmark_addition.run(
-        print_data=True,
-        triton_fn=triton_add,
-        torch_fn=torch_add,
-        input_shapes_fn=add_shapes,
-        save_path='./benchmarks/'
-    )
+    if args.all or args.sub:
+        print("\nRunning subtraction benchmarks...")
+        def triton_sub(x, y): return x - y
+        def torch_sub(x, y): return x - y
+        def sub_shapes(size, broadcasting):
+            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
+        benchmark_sub.run(
+            print_data=True,
+            triton_fn=triton_sub,
+            torch_fn=torch_sub,
+            input_shapes_fn=sub_shapes,
+            save_path='./benchmarks/'
+        )
 
-    # SUBTRACTION
-    def triton_sub(x, y): return x - y
-    def torch_sub(x, y): return x - y
-    def sub_shapes(size, broadcasting):
-        return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-    benchmark_sub.run(
-        print_data=True,
-        triton_fn=triton_sub,
-        torch_fn=torch_sub,
-        input_shapes_fn=sub_shapes,
-        save_path='./benchmarks/'
-    )
+    if args.all or args.mul:
+        print("\nRunning multiplication benchmarks...")
+        def triton_mul(x, y): return x * y
+        def torch_mul(x, y): return x * y
+        def mul_shapes(size, broadcasting):
+            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
+        benchmark_mul.run(
+            print_data=True,
+            triton_fn=triton_mul,
+            torch_fn=torch_mul,
+            input_shapes_fn=mul_shapes,
+            save_path='./benchmarks/'
+        )
 
-    # MULTIPLICATION
-    def triton_mul(x, y): return x * y
-    def torch_mul(x, y): return x * y
-    def mul_shapes(size, broadcasting):
-        return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-    benchmark_mul.run(
-        print_data=True,
-        triton_fn=triton_mul,
-        torch_fn=torch_mul,
-        input_shapes_fn=mul_shapes,
-        save_path='./benchmarks/'
-    )
-
-    # DIVISION
-    def triton_div(x, y): return x / y
-    def torch_div(x, y): return x / y
-    def div_shapes(size, broadcasting):
-        return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-    benchmark_div.run(
-        print_data=True,
-        triton_fn=triton_div,
-        torch_fn=torch_div,
-        input_shapes_fn=div_shapes,
-        save_path='./benchmarks/'
-    )
+    if args.all or args.div:
+        print("\nRunning division benchmarks...")
+        def triton_div(x, y): return x / y
+        def torch_div(x, y): return x / y
+        def div_shapes(size, broadcasting):
+            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
+        benchmark_div.run(
+            print_data=True,
+            triton_fn=triton_div,
+            torch_fn=torch_div,
+            input_shapes_fn=div_shapes,
+            save_path='./benchmarks/'
+        )
