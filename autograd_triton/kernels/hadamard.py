@@ -57,7 +57,7 @@ def binary_op_forward(
     # triton has its own internal definitions of all the basic ops that deal with the actual entry-wise details
     # The conditional here is on a compile-time constant,
     # which Triton can “fold” or “inline” so there’s no runtime overhead.
-    # You’ll get a separate compiled kernel per value of OP.
+    # Basically, you’ll get a separate compiled kernel per value of OP.
     if OP == "add":
         out = x + y
     elif OP == "sub":
@@ -96,13 +96,6 @@ def binary_op_backward(
     # Get program ID
     pid = tl.program_id(axis=0)
 
-    """
-    # create a buffer to store gradients that'll be accumulated at the end
-    buffer_row = tl.cdiv(n_elements, loop_stride)
-    buffer = tl.arange(0, buffer_rows).expand_dims(1) + tl.arange(0, loop_stride).expand_dims(0)
-    tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-    """
-
     # Calculate starting offset for this program instance
     block_start_x = pid * BLOCK_SIZE
     block_start_y = block_start_x % loop_stride # the looping is how we handle broadcasting
@@ -128,8 +121,8 @@ def binary_op_backward(
             y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
             dx += do * y_val
         elif OP == "div":
-            # We do x / y => dx = (1 / y) * do
             y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            # We do x / y => dx = (1 / y) * do
             dx += do / y_val
 
         tl.store(dx_ptr + offsets_x, dx, mask=mask_x)
@@ -144,9 +137,9 @@ def binary_op_backward(
         elif OP == "sub":
             tl.atomic_add(dy_ptr + offsets_y, -do, mask=mask_y)
         elif OP == "mul":
-            # y gradient = do * x
-            # load x_ptr + offsets_x
+            # load x
             x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            # dy = do * x
             tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
         elif OP == "div":
             # out = x / y => dy = -(x*do)/y^2
