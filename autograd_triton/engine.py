@@ -15,7 +15,7 @@ from math import prod
 import torch
 import triton
 import triton.language as tl
-from kernels import hadamard
+from kernels import hadamard, matmul
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
@@ -103,7 +103,7 @@ class TritonTensor:
             OP=op
         )
         
-        # Wrap output in Tensor with autograd information
+        # Wrap output in TritonTensor with autograd information
         out = TritonTensor(
             output,
             requires_grad = (self.requires_grad or other.requires_grad),
@@ -147,9 +147,65 @@ class TritonTensor:
         raise NotImplementedError("Negation kernel not yet implemented")
 
     def __matmul__(self, other):
-        """Placeholder for matrix multiplication"""
-        # TODO: Implement Triton kernel for matrix multiplication
-        raise NotImplementedError("Matrix multiplication kernel not yet implemented")
+        """
+        matmul implementation built to support only the shapes we need, so
+        tensor @ tensor for the self-attention mechanism
+        and tensor @ matrix for linear layers
+        """
+        # check constraints
+        assert (self.ndim >= 2 and 
+                (self.shape == other.shape or other.ndim == 2)
+                and self.shape[-2] == other.shape[-1]), \
+                f"incompatible dimensions for matmul, A: {self.shape} and B: {other.shape}"
+        assert self.data.is_contiguous(), "matrix A must be contiguous" # TODO but why not other tho?
+    
+        # get matrix dimension lengths
+        preceeding_dims = prod(self.shape[:-2]) if self.ndim > 2 else 1
+        (m, k), (_, n) = self.shape[-2:], other.shape[-2:]
+
+        # allocates output
+        if self.ndim > 2:
+            out = torch.empty((preceeding_dims, m, n), device=self.device, dtype=torch.float32)
+        else:
+            out = torch.empty((m, n), device=self.device, dtype=torch.float32)
+
+        # 2D launch kernel where each preceeding_dim and each block gets its own program
+        grid = lambda meta: (
+            triton.cdiv(m, meta['BLOCK_SIZE_M']) * triton.cdiv(n, meta['BLOCK_SIZE_N']), 
+            preceeding_dims
+            )
+        matmul.matmul_fwd[grid](
+            self.data, other.data, out,
+            m, n, k,
+            self.data.stride(0), self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
+            other.data.stride(0), other.data.stride(-2), other.data.stride(-1),
+            out.stride(0), out.stride(-2), out.stride(-1),
+        )
+        
+        # Wrap output in Tensor with autograd information
+        out = TritonTensor(
+            out,
+            requires_grad = (self.requires_grad or other.requires_grad),
+            _children = (self, other)
+        )
+        
+        # define our backward pass
+        def _backward():
+            pass
+
+            # Only run backward kernel if at least one input requires grad
+            if not self.requires_grad and not other.requires_grad:
+                pass
+
+            # reusing the same grid from earlier
+            matmul.matmul_bwd[grid](
+                self.data, other.data,
+                self.grad, other.grad, out.grad, 
+                # TODO
+            )
+        out._backward = _backward
+
+        return out
 
     def sum(self, dim=None, keepdim=False):
         """Placeholder for sum reduction"""

@@ -180,6 +180,45 @@ def benchmark_div(total_elements, provider,
     flops = sum(2 * prod(shape) for shape in shapes)
     return flops * 1e-12 / (ms * 1e-3)
 
+# Create "matmul" configs
+matmul_configs = []
+for mode in ["fwd", "bwd"]:
+    for broadcasting in [True, False]:
+        div_configs.append(
+            triton.testing.Benchmark(
+                x_names=['total_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
+                line_vals=['torch', 'triton'],  # Possible values for line_arg
+                line_names=['PyTorch', 'Triton'],  # Label name for different lines
+                styles=[('blue', '-'), ('red', '-')],  # Line styles
+                ylabel='TFLOPS',  # Label name for y-axis
+                xlabel="Total Elements (millions)", # Label name for x-axis
+                plot_name=f'matmul_{mode}_broadcasting={broadcasting}',  # Name for plot
+                args={"mode": mode, "broadcasting": broadcasting,},
+            ))
+
+@triton.testing.perf_report(matmul_configs)
+def benchmark_matmul(total_elements, provider,
+                  triton_fn, torch_fn,
+                  input_shapes_fn,
+                  mode,
+                  broadcasting,
+                  device=DEVICE):
+    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
+    inputs = [torch.randn(shape, device=device) for shape in shapes]
+    # TODO fix shape and TFLOP calculation to make sense w/ each other
+    
+    if provider == 'torch':
+        fn = lambda: torch_fn(*inputs)
+    else:
+        triton_inputs = [TritonTensor(x) for x in inputs]
+        fn = lambda: triton_fn(*triton_inputs)
+    
+    ms = triton.testing.do_bench(fn)
+    flops = sum(2 * prod(shape) for shape in shapes)
+    return flops * 1e-12 / (ms * 1e-3)
+
 if __name__ == "__main__":
     import argparse
     
@@ -250,5 +289,20 @@ if __name__ == "__main__":
             triton_fn=triton_div,
             torch_fn=torch_div,
             input_shapes_fn=div_shapes,
+            save_path='./benchmarks/'
+        )
+
+    if args.all or args.matmul:
+        print("\nRunning matmul benchmarks...")
+        def triton_matmul(x, y): return x@ y
+        def torch_matmul(x, y): return x @ y
+        def matmul_shapes(size, broadcasting):
+            return [(size, size, size // 2), (size // 2, size)] if broadcasting else [(size, size // 2), (size // 2, size * 2)]
+            # TODO fix TFLOPS calculation in graphs
+        benchmark_div.run(
+            print_data=True,
+            triton_fn=triton_matmul,
+            torch_fn=torch_matmul,
+            input_shapes_fn=matmul_shapes,
             save_path='./benchmarks/'
         )

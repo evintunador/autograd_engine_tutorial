@@ -74,6 +74,7 @@ if __name__ == "__main__":
     parser.add_argument('--sub', action='store_true', help='Run subtraction tests')
     parser.add_argument('--mul', action='store_true', help='Run multiplication tests')
     parser.add_argument('--div', action='store_true', help='Run division tests')
+    parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication tests')
     
     args = parser.parse_args()
     
@@ -150,4 +151,15 @@ if __name__ == "__main__":
             triton_div,
             torch_div,
             [(B, N, D), (D)]
+        )
+
+    ### MATMUL
+    if args.all or args.matmul:
+        def triton_matmul(x, y): return x @ y
+        def torch_matmul(x, y): return x @ y
+        test_operation(
+            f"matmul: ({N}, {D}) @ ({D}, {N})",
+            triton_matmul,
+            torch_matmul,
+            [(N, D), (D, N)]
         )
