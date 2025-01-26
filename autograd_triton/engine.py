@@ -97,10 +97,9 @@ class TritonTensor:
         # Define grid based on tensor dimensions
         grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
         # Launch kernel
-        hadamard.binary_op_kernel[grid](
+        hadamard.binary_op_forward[grid](
             self.data, other.data, output, 
             n_elements, loop_stride,
-            BLOCK_SIZE=1024, # TODO autotune addition kernels
             OP=op
         )
         
@@ -117,12 +116,12 @@ class TritonTensor:
             if not self.requires_grad and not other.requires_grad:
                 pass
 
-            hadamard.binary_op_backward_kernel[grid](
+            # reusing the same grid from earlier
+            hadamard.binary_op_backward[grid](
                 self.data, other.data,
                 self.grad, other.grad, out.grad, 
                 n_elements, loop_stride,
-                BLOCK_SIZE=1024,
-                OP=op
+                OP=op,
             )
             # doesn't return anything because it writes to the self.grad and self.other tensors in-place
 
@@ -263,6 +262,20 @@ class TritonTensor:
         for node in reversed(topo):
             node._backward()
 
+    def zero_grad_backward(self):
+        self.grad = torch.zeros_like(self.grad) if self.grad is not None else None
+        topo = []
+        visited = set()
+        def build_topo(v):
+            if v not in visited:
+                visited.add(v)
+                for child in v._prev:
+                    build_topo(child)
+                topo.append(v)
+        build_topo(self)
+        for node in reversed(topo):
+            node.grad = torch.zeros_like(node.grad) if node.grad is not None else None
+
 
 
 def test_operation(op_name: str,
@@ -301,6 +314,14 @@ def test_operation(op_name: str,
     torch.testing.assert_close(triton_out.data, torch_out, rtol=rtol, atol=atol)
     print(f"✓ Forward pass matches")
     
+    # before computing the backward pass, we need to let the autotuner run.
+    # this needs to be done bc otherwise the gradient accumulation of each run would compound
+    #  to incorrect values
+    zero_grad = torch.zeros_like(torch_out)
+    triton_out.backward(zero_grad)
+    # and in order to avoid any potential divide by zero Nan's, we also set all gradients to 0
+    triton_out.zero_grad_backward()
+
     # Backward pass
     grad_output = torch.randn_like(torch_out)
     torch_out.backward(grad_output)

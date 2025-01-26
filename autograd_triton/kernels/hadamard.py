@@ -4,31 +4,24 @@ import triton.language as tl
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
-# TODO make add_kernel support different input shapes
-# TODO 
 
-"""
 @triton.autotune( # decorator figures out what meta-parameters will be most efficient
     [
-        triton.Config(
-            {"BLOCK_SIZE": BLOCK_SIZE},
-            num_stages=num_stages, num_warps=num_warps,
-        )
-        for BLOCK_SIZE in [32, 64, 128, 256] # values chosen heuristically
+        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE in [512, 1024, 2048, 4096] # values chosen by totally guessing
         for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for num_warps in [2, 4, 8]
     ],
     key=["n_elements", "loop_stride"], # auto-tune will re-run every time either of these values are different in a new input
 )
-"""
 @triton.jit # this decorator tells Triton to compile this function into GPU code
-def binary_op_kernel(
+def binary_op_forward(
     x_ptr, y_ptr,               # pointers to input vectors (triton converts torch.tensor objects into pointers to their first element)
     output_ptr,                 # ptr to output vector
     n_elements,                 # size of x tensor
     loop_stride,                # size of y tensor
-    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
     OP: tl.constexpr,           # the operation to be performed
+    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
 ):   
     # tl.constexpr is a type that tells the compiler that the value must be known at compile-time (not runtime)
     # there are multiple "programs" processing data (a program is a unique instantiation of this kernel)
@@ -45,9 +38,10 @@ def binary_op_kernel(
 
     # this program will process inputs that are offset from the initial data (^ described above)
     # note that offsets is a list of pointers a la [0, 1, 2, ...., 62, 63]
-    block_start = program_id * BLOCK_SIZE
-    offsets_x = block_start + tl.arange(0, BLOCK_SIZE)
-    offsets_y = offsets_x % loop_stride
+    block_start_x = program_id * BLOCK_SIZE
+    block_start_y = block_start_x % loop_stride # the looping is how we handle broadcasting
+    offsets_x = block_start_x + tl.arange(0, BLOCK_SIZE)
+    offsets_y = (block_start_y + tl.arange(0, BLOCK_SIZE)) % loop_stride
     
     # Create masks to guard memory operations
     mask_x = offsets_x < n_elements
@@ -78,20 +72,37 @@ def binary_op_kernel(
     # write back to DRAM, being sure to mask to avoid out-of-bounds accesses
     tl.store(output_ptr + offsets_x, out, mask = mask_x)
 
+
+@triton.autotune( # decorator figures out what meta-parameters will be most efficient
+    [
+        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE in [512, 1024, 2048, 4096] # values chosen by totally guessing
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["n_elements", "loop_stride"], # auto-tune will re-run every time either of these values are different in a new input
+)
 @triton.jit
-def binary_op_backward_kernel(
+def binary_op_backward(
     x_ptr, y_ptr,               # pointers to input vectors
     dx_ptr,                     # pointer to first input's gradient, or None if x doesn't require a gradient
     dy_ptr,                     # pointer to second input's gradient, or None if y doesn't require a gradient
     do_ptr,                     # pointer to incoming gradient
     n_elements,                 # total number of elements in x and output tensors
     loop_stride,                # total number of elements in y tensor
-    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
     OP: tl.constexpr,           # the operation to be performed
+    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
 ):
     # Get program ID
     pid = tl.program_id(axis=0)
-    
+
+    """
+    # create a buffer to store gradients that'll be accumulated at the end
+    buffer_row = tl.cdiv(n_elements, loop_stride)
+    buffer = tl.arange(0, buffer_rows).expand_dims(1) + tl.arange(0, loop_stride).expand_dims(0)
+    tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    """
+
     # Calculate starting offset for this program instance
     block_start_x = pid * BLOCK_SIZE
     block_start_y = block_start_x % loop_stride # the looping is how we handle broadcasting
