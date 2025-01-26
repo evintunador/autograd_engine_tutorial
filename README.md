@@ -63,9 +63,22 @@ Personally I'm on a Mac so i plan on doing all my work on a cloud provider like 
 			- [x] figure out broadcasting
 			- [x] fwd kernel
 			- [x] bwd kernel
-		- [ ] the rest of the ops
+    	- [x] the rest of the ops
 	- [x] testing
-- [x] benchmarking
+- [ ] kernels/
+	- [x] the rest of the ops
+    	- [ ] clean up the if statement logic
+	- [x] autotuning
+    	- [ ] fix bwd pass tests incompatibility w/ autotuning
+- [ ] benchmarking.py
+	- [x] add new hadamards
+	- [x] make x-axis "size" mean something
+	- [x] make individual benchmarks callable
+	- [ ] make maximum input size either an input arg or smart enough not to max out ram on a given GPU. maybe pull HBM size and calculate?
+	- [ ] combine all hadamard tests into one
+- [ ] nn.py
+- [ ] model.py
+- [ ] train.py
 
 ## autograd (CUDA)
 I'll consider building this if 1) the other three perform well 2) people are interested and 3) i become a masochist
