@@ -23,6 +23,7 @@ these instructions are for setting up a cloud GPU instance on [lambdalabs](https
 3. once it's running, open the jupyter lab environment (Lambda provides this; i presume others do too). Optionally you could instead ssh into the instance in order to be able to use your own IDE
 4. Open the terminal in your instance and install github CLI
 ```sudo apt update```
+```sudo apt install build-essential```
 ```sudo apt install gh```
 5. Input the following command and follow the prompts to log in to your GitHub account. Choose https and you'll need to open up the provided link in your browser
 ```gh auth login```
