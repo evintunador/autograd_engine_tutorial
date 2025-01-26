@@ -63,8 +63,7 @@ class TritonTensor:
         return f"Tensor:\n{self.data}\nGrad:{self.grad}"
     
     def _hadamard(self, other, op):
-        """a simple hadamard (entry-wise) operation that supports broadcasting of other up to size self
-        """
+        """a simple hadamard (entry-wise) operation that supports broadcasting of `other` up to size `self`"""
         # Ensures all tensors are on the same GPU device
         assert self.device == other.device, \
             f'tensors must be on same device but got self.device: {self.device}, other.device: {other.device}'
@@ -100,7 +99,7 @@ class TritonTensor:
         hadamard.binary_op_forward[grid](
             self.data, other.data, output, 
             n_elements, loop_stride,
-            OP=op
+            OP=op, # designates which operation to run (addition, subtraction, multiplication, division)
         )
         
         # Wrap output in TritonTensor with autograd information
@@ -121,7 +120,7 @@ class TritonTensor:
                 self.data, other.data,
                 self.grad, other.grad, out.grad, 
                 n_elements, loop_stride,
-                OP=op,
+                OP=op, # designates which operation to run (addition, subtraction, multiplication, division
             )
             # doesn't return anything because it writes to the self.grad and self.other tensors in-place
 
@@ -149,38 +148,62 @@ class TritonTensor:
     def __matmul__(self, other):
         """
         matmul implementation built to support only the shapes we need, so
-        tensor @ tensor for the self-attention mechanism
-        and tensor @ matrix for linear layers
+        A: tensor @ B: tensor = C: tensor   for the self-attention mechanism and
+        A: tensor @ B: matrix = C: tensor   for linear layers
         """
         # check constraints
-        assert (self.ndim >= 2 and 
-                (self.shape == other.shape or other.ndim == 2)
-                and self.shape[-2] == other.shape[-1]), \
-                f"incompatible dimensions for matmul, A: {self.shape} and B: {other.shape}"
+        assert self.ndim >=2 and other.ndim >= 2, \
+            f'matmul inputs must be tensors or matrices, not vectors, but got A.ndim={self.ndim}, B.ndim={other.ndim}'
+        assert self.ndim >= other.ndim, \
+            f'matmul only supports broadcasting second input tensor, meaning B must have equal to or fewer dims than A'
+        assert self.shape[-2] == other.shape[-1], \
+            f'incompatible dimensions for matmul, A: {self.shape} and B: {other.shape}'
+        if other.ndim > 2:
+            assert self.shape[:-2] == other.shape[:-2], \
+                f'matmul only supports tensor inputs of same leading dimensions shape, but got A: {self.shape} and B: {other.shape}'
         assert self.data.is_contiguous(), "matrix A must be contiguous" # TODO but why not other tho?
     
         # get matrix dimension lengths
-        preceeding_dims = prod(self.shape[:-2]) if self.ndim > 2 else 1
-        (m, k), (_, n) = self.shape[-2:], other.shape[-2:]
+        (m, k), n = self.shape[-2:], other.shape[-1]
+        # how many batches and heads to parallelize along
+        parallel_matrix_ct = prod(self.shape[:-2]) if self.ndim > 2 else 1
 
         # allocates output
-        if self.ndim > 2:
-            out = torch.empty((preceeding_dims, m, n), device=self.device, dtype=torch.float32)
-        else:
-            out = torch.empty((m, n), device=self.device, dtype=torch.float32)
+        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=torch.float32)
 
         # 2D launch kernel where each preceeding_dim and each block gets its own program
         grid = lambda meta: (
             triton.cdiv(m, meta['BLOCK_SIZE_M']) * triton.cdiv(n, meta['BLOCK_SIZE_N']), 
-            preceeding_dims
+            parallel_matrix_ct
             )
-        matmul.matmul_fwd[grid](
-            self.data, other.data, out,
-            m, n, k,
-            self.data.stride(0), self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
-            other.data.stride(0), other.data.stride(-2), other.data.stride(-1),
-            out.stride(0), out.stride(-2), out.stride(-1),
-        )
+        
+        if self.ndim == 2: # if A and B are both is a matrices
+            # here we're doing matrix by matrix matmul, which doesn't actually get used by a GPT, it's just here as a first step
+            matmul.matmul_fwd_m_by_m[grid](
+                self.data, other.data, out,
+                m, n, k,
+                self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
+                other.data.stride(-2), other.data.stride(-1),
+                out.stride(-2), out.stride(-1),
+            )
+        elif other.ndim > 2: # if B is a tensor
+            # here we're doing tensor by tensor matmul, which only gets used in the attention mechanism
+            matmul.matmul_fwd_t_by_t[grid](
+                self.data, other.data, out,
+                m, n, k,
+                self.data.stride(-3), self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
+                other.data.stride(-3), other.data.stride(-2), other.data.stride(-1),
+                out.stride(-3), out.stride(-2), out.stride(-1),
+            )
+        else: # if B is a matrix
+            # here we're doing tensor by matrix matmul, which gets used for all linear layers
+            matmul.matmul_fwd_t_by_m[grid](
+                self.data, other.data, out,
+                m, n, k,
+                self.data.stride(-3), self.data.stride(-2), self.data.stride(-1), 
+                other.data.stride(0), other.data.stride(1),
+                out.stride(-3), out.stride(-2), out.stride(-1),
+            )
         
         # Wrap output in Tensor with autograd information
         out = TritonTensor(
@@ -198,7 +221,7 @@ class TritonTensor:
                 pass
 
             # reusing the same grid from earlier
-            matmul.matmul_bwd[grid](
+            matmul.matmul_bwd_t_by_t[grid](
                 self.data, other.data,
                 self.grad, other.grad, out.grad, 
                 # TODO

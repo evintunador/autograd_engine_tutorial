@@ -83,7 +83,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D = 32, 1024, 8, 64
+    B, N, H, D = 32, 1024, 8, 256
 
     ### ADDITION
     if args.all or args.add:
@@ -162,4 +162,16 @@ if __name__ == "__main__":
             triton_matmul,
             torch_matmul,
             [(N, D), (D, N)]
+        )
+        test_operation(
+            f"matmul with leading dimensions: ({B}, {H}, {N}, {D}) @ ({B}, {H}, {D}, {N})",
+            triton_matmul,
+            torch_matmul,
+            [(B, H, N, D), (B, H, D, N)]
+        )
+        test_operation(
+            f"matmul with broadcasting: ({B}, {N}, {D}) @ ({D}, {N})",
+            triton_matmul,
+            torch_matmul,
+            [(B, N, D), (D, N)]
         )

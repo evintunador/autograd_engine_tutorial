@@ -85,8 +85,7 @@ def binary_op_forward(
 @triton.jit
 def binary_op_backward(
     x_ptr, y_ptr,               # pointers to input vectors
-    dx_ptr,                     # pointer to first input's gradient, or None if x doesn't require a gradient
-    dy_ptr,                     # pointer to second input's gradient, or None if y doesn't require a gradient
+    dx_ptr, dy_ptr,             # pointer to each input's gradient, or None if y doesn't require a gradient
     do_ptr,                     # pointer to incoming gradient
     n_elements,                 # total number of elements in x and output tensors
     loop_stride,                # total number of elements in y tensor
