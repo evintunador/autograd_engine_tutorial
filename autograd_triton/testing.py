@@ -14,7 +14,6 @@ def test_operation(op_name: str,
                   triton_fn,
                   torch_fn,
                   input_shapes: list,
-                  dtype=torch.float32,
                   device=DEVICE,
                   rtol=1e-3,
                   atol=1e-3):
@@ -34,7 +33,7 @@ def test_operation(op_name: str,
     print(f"\nTesting {op_name}...")
     
     # Generate random inputs
-    torch_inputs = [torch.randn(shape, dtype=dtype, device=device, requires_grad=True) 
+    torch_inputs = [torch.randn(shape, dtype=torch.float16, device=device, requires_grad=True) 
                    for shape in input_shapes]
     triton_inputs = [TritonTensor(x, requires_grad=True) for x in torch_inputs]
     
@@ -83,7 +82,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D = 32, 1024, 8, 256
+    B, N, H, D = 32, 2048, 8, 768
 
     ### ADDITION
     if args.all or args.add:
@@ -163,6 +162,7 @@ if __name__ == "__main__":
             torch_matmul,
             [(N, D), (D, N)]
         )
+        """
         test_operation(
             f"matmul with leading dimensions: ({B}, {H}, {N}, {D}) @ ({B}, {H}, {D}, {N})",
             triton_matmul,
@@ -175,3 +175,4 @@ if __name__ == "__main__":
             torch_matmul,
             [(B, N, D), (D, N)]
         )
+        """

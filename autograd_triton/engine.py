@@ -33,9 +33,14 @@ class TritonTensor:
         
         # Convert input data to torch.Tensor if it isn't already
         if isinstance(data, torch.Tensor):
-            self.data = data
+            self.data = data.to(torch.float16) 
+                # we're enforcing our autograd engine only use fp16 for simplicity's sake
+                # however, kernels that need to do accumulation will often do it in fp32
+
+            # disbale pytorch's in-built gradient tracking
+            self.data.requires_grad = False
         else:
-            self.data = torch.tensor(data, dtype=torch.float32, requires_grad=False)
+            self.data = torch.tensor(data, dtype=dtorch.float16, requires_grad=False)
                 # requires_grad=False prevents pytorch from taking up memory by keeping track of its own gradient
         
         # Move tensor to specified device (default to CUDA if available)
@@ -64,7 +69,7 @@ class TritonTensor:
     
     def _hadamard(self, other, op):
         """a simple hadamard (entry-wise) operation that supports broadcasting of `other` up to size `self`"""
-        # Ensures all tensors are on the same GPU device
+        # Ensures all tensors are on the same GPU device and of the same dtype
         assert self.device == other.device, \
             f'tensors must be on same device but got self.device: {self.device}, other.device: {other.device}'
 
@@ -115,14 +120,35 @@ class TritonTensor:
             if not self.requires_grad and not other.requires_grad:
                 pass
 
-            # reusing the same grid from earlier
-            hadamard.binary_op_backward[grid](
-                self.data, other.data,
-                self.grad, other.grad, out.grad, 
-                n_elements, loop_stride,
-                OP=op, # designates which operation to run (addition, subtraction, multiplication, division
-            )
-            # doesn't return anything because it writes to the self.grad and self.other tensors in-place
+            if self.shape == other.shape:
+                # if there's no broadcasting being done, then there's no accumulation of gradients being done,
+                #  so therefore it's likely numerically safe to calculate gradients in fp16
+
+                # reusing the same grid from earlier
+                hadamard.binary_op_backward[grid](
+                    self.data, other.data,
+                    self.grad, other.grad, out.grad, 
+                    n_elements, loop_stride,
+                    OP=op, # designates which operation to run (addition, subtraction, multiplication, division
+                )
+            else:
+                # when broadcasting, we'll calculate gradients in fp32 for increased accuracy when accumulating
+                self_data = self.data.to(torch.float32)
+                other_data = other.data.to(torch.float32)
+                self_grad = self.grad.to(torch.float32)
+                other_grad = other.grad.to(torch.float32)
+                out_grad = out.grad.to(torch.float32)
+
+                hadamard.binary_op_backward[grid](
+                    self_data, other_data,
+                    self_grad, other_grad, out_grad, 
+                    n_elements, loop_stride,
+                    OP=op, # designates which operation to run (addition, subtraction, multiplication, division
+                )
+
+                self.grad = self_grad.to(torch.float16)
+                other.grad = other_grad.to(torch.float16)
+                out.grad = out_grad.to(torch.float16)
 
         out._backward = _backward
         
@@ -150,6 +176,8 @@ class TritonTensor:
         matmul implementation built to support only the shapes we need, so
         A: tensor @ B: tensor = C: tensor   for the self-attention mechanism and
         A: tensor @ B: matrix = C: tensor   for linear layers
+        also we don't need this regular matmul shape layout, but hey why not
+        A: matrix @ B: matrix = C: matrix
         """
         # check constraints
         assert self.ndim >=2 and other.ndim >= 2, \
@@ -161,7 +189,7 @@ class TritonTensor:
         if other.ndim > 2:
             assert self.shape[:-2] == other.shape[:-2], \
                 f'matmul only supports tensor inputs of same leading dimensions shape, but got A: {self.shape} and B: {other.shape}'
-        assert self.data.is_contiguous(), "matrix A must be contiguous" # TODO but why not other tho?
+        assert self.data.is_contiguous(), "matrix A must be contiguous" # TODO but why not other/B as well tho?
     
         # get matrix dimension lengths
         (m, k), n = self.shape[-2:], other.shape[-1]
@@ -169,7 +197,7 @@ class TritonTensor:
         parallel_matrix_ct = prod(self.shape[:-2]) if self.ndim > 2 else 1
 
         # allocates output
-        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=torch.float32)
+        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=torch.float16)
 
         # 2D launch kernel where each preceeding_dim and each block gets its own program
         grid = lambda meta: (
@@ -177,7 +205,7 @@ class TritonTensor:
             parallel_matrix_ct
             )
         
-        if self.ndim == 2: # if A and B are both is a matrices
+        if self.ndim == 2: # if A and B are both matrices
             # here we're doing matrix by matrix matmul, which doesn't actually get used by a GPT, it's just here as a first step
             matmul.matmul_fwd_m_by_m[grid](
                 self.data, other.data, out,
@@ -186,7 +214,7 @@ class TritonTensor:
                 other.data.stride(-2), other.data.stride(-1),
                 out.stride(-2), out.stride(-1),
             )
-        elif other.ndim > 2: # if B is a tensor
+        elif other.ndim > 2: # if A and B are both tensors
             # here we're doing tensor by tensor matmul, which only gets used in the attention mechanism
             matmul.matmul_fwd_t_by_t[grid](
                 self.data, other.data, out,
@@ -195,7 +223,7 @@ class TritonTensor:
                 other.data.stride(-3), other.data.stride(-2), other.data.stride(-1),
                 out.stride(-3), out.stride(-2), out.stride(-1),
             )
-        else: # if B is a matrix
+        else: # if A is a tensor and B is a matrix
             # here we're doing tensor by matrix matmul, which gets used for all linear layers
             matmul.matmul_fwd_t_by_m[grid](
                 self.data, other.data, out,
@@ -207,7 +235,7 @@ class TritonTensor:
         
         # Wrap output in Tensor with autograd information
         out = TritonTensor(
-            out,
+            out.to(self.data.dtype),
             requires_grad = (self.requires_grad or other.requires_grad),
             _children = (self, other)
         )
