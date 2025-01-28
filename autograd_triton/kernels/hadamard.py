@@ -142,7 +142,7 @@ def binary_op_backward(
             tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
         elif OP == "div":
             # out = x / y => dy = -(x*do)/y^2
-            x_val = tl.load(x_ptr + offsets_x, mask=mask_x).to(tl.float32)
-            y_val = tl.load(y_ptr + offsets_y, mask=mask_y).to(tl.float32)
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
             partial_dy = -x_val * do / (y_val * y_val)
             tl.atomic_add(dy_ptr + offsets_y, partial_dy, mask=mask_y)

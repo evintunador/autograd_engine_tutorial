@@ -36,9 +36,6 @@ class TritonTensor:
             self.data = data.to(torch.float16) 
                 # we're enforcing our autograd engine only use fp16 for simplicity's sake
                 # however, kernels that need to do accumulation will often do it in fp32
-
-            # disbale pytorch's in-built gradient tracking
-            self.data.requires_grad = False
         else:
             self.data = torch.tensor(data, dtype=dtorch.float16, requires_grad=False)
                 # requires_grad=False prevents pytorch from taking up memory by keeping track of its own gradient
@@ -133,14 +130,14 @@ class TritonTensor:
                 )
             else:
                 # when broadcasting, we'll calculate gradients in fp32 for increased accuracy when accumulating
-                self_data = self.data.to(torch.float32)
-                other_data = other.data.to(torch.float32)
+                #self_data = self.data.to(torch.float32)
+                #other_data = other.data.to(torch.float32)
                 self_grad = self.grad.to(torch.float32)
                 other_grad = other.grad.to(torch.float32)
                 out_grad = out.grad.to(torch.float32)
 
                 hadamard.binary_op_backward[grid](
-                    self_data, other_data,
+                    self.data, other.data,
                     self_grad, other_grad, out_grad, 
                     n_elements, loop_stride,
                     OP=op, # designates which operation to run (addition, subtraction, multiplication, division
