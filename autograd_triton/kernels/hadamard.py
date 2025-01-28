@@ -106,10 +106,10 @@ def binary_op_backward(
     mask_y = offsets_y < loop_stride
     
     # Load incoming gradient do
-    do = tl.load(do_ptr + offsets_x, mask=mask_x)
+    do = tl.load(do_ptr + offsets_x, mask=mask_x) # fp32
     
     if dx_ptr is not None: # TODO test inputs having requires_grad=False
-        dx = tl.load(dx_ptr + offsets_x, mask=mask_x)
+        dx = tl.load(dx_ptr + offsets_x, mask=mask_x) # fp32
 
         if OP == "add":
             dx += do
@@ -120,9 +120,9 @@ def binary_op_backward(
             y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
             dx += do * y_val
         elif OP == "div":
-            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y).to(tl.float32)
             # We do x / y => dx = (1 / y) * do
-            dx += do / y_val
+            dx += tl.clamp(do / y_val, min=-1e5, max=1e5)
 
         tl.store(dx_ptr + offsets_x, dx, mask=mask_x)
     
@@ -137,12 +137,12 @@ def binary_op_backward(
             tl.atomic_add(dy_ptr + offsets_y, -do, mask=mask_y)
         elif OP == "mul":
             # load x
-            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x).to(tl.float32)
             # dy = do * x
             tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
         elif OP == "div":
             # out = x / y => dy = -(x*do)/y^2
-            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
-            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
-            partial_dy = -x_val * do / (y_val * y_val)
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x).to(tl.float32)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y).to(tl.float32)
+            partial_dy = tl.clamp(-x_val * do / (y_val * y_val), min=-1e5, max=1e5)
             tl.atomic_add(dy_ptr + offsets_y, partial_dy, mask=mask_y)
