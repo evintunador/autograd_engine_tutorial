@@ -183,39 +183,10 @@ class TritonTensor:
         matmul.matmul_fwd[grid](
             self.data, other.data, out,
             m, n, k,
-            self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
+            self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1),
             other.data.stride(-3) if other.ndim > 2 else 0, other.data.stride(-2), other.data.stride(-1),
             out.stride(-3) if out.ndim > 2 else 0, out.stride(-2), out.stride(-1),
         )
-        """
-        if self.ndim == 2: # if A and B are both matrices
-            # here we're doing matrix by matrix matmul, which doesn't actually get used by a GPT, it's just here as a first step
-            matmul.matmul_fwd_m_by_m[grid](
-                self.data, other.data, out,
-                m, n, k,
-                self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
-                other.data.stride(-2), other.data.stride(-1),
-                out.stride(-2), out.stride(-1),
-            )
-        elif other.ndim > 2: # if A and B are both tensors
-            # here we're doing tensor by tensor matmul, which only gets used in the attention mechanism
-            matmul.matmul_fwd_t_by_t[grid](
-                self.data, other.data, out,
-                m, n, k,
-                self.data.stride(-3), self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
-                other.data.stride(-3), other.data.stride(-2), other.data.stride(-1),
-                out.stride(-3), out.stride(-2), out.stride(-1),
-            )
-        else: # if A is a tensor and B is a matrix
-            # here we're doing tensor by matrix matmul, which gets used for all linear layers
-            matmul.matmul_fwd_t_by_t[grid](
-                self.data, other.data, out,
-                m, n, k,
-                self.data.stride(-3), self.data.stride(-2), self.data.stride(-1), 
-                0, other.data.stride(-2), other.data.stride(-1),
-                out.stride(-3), out.stride(-2), out.stride(-1),
-            )
-        """
         
         # Wrap output in Tensor with autograd information
         out = TritonTensor(
@@ -226,17 +197,25 @@ class TritonTensor:
         
         # define our backward pass
         def _backward():
-            pass
-
             # Only run backward kernel if at least one input requires grad
             if not self.requires_grad and not other.requires_grad:
                 pass
-
-            # reusing the same grid from earlier
-            matmul.matmul_bwd_t_by_t[grid](
-                self.data, other.data,
+            
+            bwd_grid = lambda meta: (
+                max(triton.cdiv(m, meta['BLOCK_SIZE_M']), triton.cdiv(k, meta['BLOCK_SIZE_K'])) *\
+                max(triton.cdiv(n, meta['BLOCK_SIZE_N']), triton.cdiv(k, meta['BLOCK_SIZE_K'])),
+                parallel_matrix_ct
+            )
+            matmul.matmul_bwd[bwd_grid](
+                self.data, other.data, out,
                 self.grad, other.grad, out.grad, 
-                # TODO
+                m, n, k,
+                self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1),
+                other.data.stride(-3) if other.ndim > 2 else 0, other.data.stride(-2), other.data.stride(-1),
+                out.stride(-3) if out.ndim > 2 else 0, out.stride(-2), out.stride(-1),
+                self.grad.stride(-3) if self.ndim > 2 else 0, self.grad.stride(-2), self.grad.stride(-1),
+                other.grad.stride(-3) if other.ndim > 2 else 0, other.grad.stride(-2), other.grad.stride(-1),
+                out.grad.stride(-3) if out.ndim > 2 else 0, out.grad.stride(-2), out.grad.stride(-1),
             )
         out._backward = _backward
 
