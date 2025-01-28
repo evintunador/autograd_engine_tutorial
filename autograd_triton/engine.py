@@ -172,7 +172,7 @@ class TritonTensor:
         parallel_matrix_ct = prod(self.shape[:-2]) if self.ndim > 2 else 1
 
         # allocates output
-        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=torch.float16)
+        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=self.dtype)
 
         # 2D launch kernel where each preceeding_dim and each block gets its own program
         grid = lambda meta: (

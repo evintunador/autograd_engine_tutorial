@@ -36,14 +36,12 @@ def test_operation(op_name: str,
     torch_inputs = [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
                    for shape in input_shapes]
     triton_inputs = [TritonTensor(x, requires_grad=True) for x in torch_inputs]
-    #print(torch_inputs[0])
-    #print(torch_inputs[1])
+    
     # Forward pass
     #with torch.autocast(device_type='cuda', dtype=torch.float32):
     torch_out = torch_fn(*torch_inputs)
     triton_out = triton_fn(*triton_inputs)
-    #print(torch_out)
-    #print(triton_out.data)
+    
     # Check forward pass
     torch.testing.assert_close(triton_out.data, torch_out, rtol=rtol, atol=atol)
     print(f"✓ Forward pass matches")
@@ -85,7 +83,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D = 32, 1024, 8, 1024
+    B, N, H, D = 32, 512, 8, 512
 
     ### ADDITION
     if args.all or args.add:
