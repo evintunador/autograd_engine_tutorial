@@ -8,7 +8,7 @@ DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 @triton.autotune( # decorator figures out what meta-parameters will be most efficient
     [
         triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE in [32, 64, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
+        for BLOCK_SIZE in [32, 64]#, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4, 8]
     ],
@@ -76,7 +76,7 @@ def binary_op_forward(
 @triton.autotune( # decorator figures out what meta-parameters will be most efficient
     [
         triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE in [32, 64, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
+        for BLOCK_SIZE in [32, 64]#, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4, 8]
     ],
@@ -106,10 +106,10 @@ def binary_op_backward(
     mask_y = offsets_y < loop_stride
     
     # Load incoming gradient do
-    do = tl.load(do_ptr + offsets_x, mask=mask_x) # fp32
+    do = tl.load(do_ptr + offsets_x, mask=mask_x)
     
     if dx_ptr is not None: # TODO test inputs having requires_grad=False
-        dx = tl.load(dx_ptr + offsets_x, mask=mask_x) # fp32
+        dx = tl.load(dx_ptr + offsets_x, mask=mask_x)
 
         if OP == "add":
             dx += do
@@ -120,9 +120,9 @@ def binary_op_backward(
             y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
             dx += do * y_val
         elif OP == "div":
-            y_val = tl.load(y_ptr + offsets_y, mask=mask_y).to(tl.float32)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
             # We do x / y => dx = (1 / y) * do
-            dx += tl.clamp(do / y_val, min=-1e5, max=1e5)
+            dx += do / y_val
 
         tl.store(dx_ptr + offsets_x, dx, mask=mask_x)
     
@@ -137,12 +137,12 @@ def binary_op_backward(
             tl.atomic_add(dy_ptr + offsets_y, -do, mask=mask_y)
         elif OP == "mul":
             # load x
-            x_val = tl.load(x_ptr + offsets_x, mask=mask_x).to(tl.float32)
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
             # dy = do * x
             tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
         elif OP == "div":
             # out = x / y => dy = -(x*do)/y^2
-            x_val = tl.load(x_ptr + offsets_x, mask=mask_x).to(tl.float32)
-            y_val = tl.load(y_ptr + offsets_y, mask=mask_y).to(tl.float32)
-            partial_dy = tl.clamp(-x_val * do / (y_val * y_val), min=-1e5, max=1e5)
+            x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            partial_dy = -x_val * do / (y_val * y_val)
             tl.atomic_add(dy_ptr + offsets_y, partial_dy, mask=mask_y)

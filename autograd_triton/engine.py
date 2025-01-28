@@ -33,11 +33,10 @@ class TritonTensor:
         
         # Convert input data to torch.Tensor if it isn't already
         if isinstance(data, torch.Tensor):
-            self.data = data.to(torch.float16) 
-                # we're enforcing our autograd engine only use fp16 for simplicity's sake
-                # however, kernels that need to do accumulation will often do it in fp32
+            self.data = data.to(torch.float32) 
+                # we're enforcing our autograd engine only use fp32 for simplicity's sake
         else:
-            self.data = torch.tensor(data, dtype=dtorch.float16, requires_grad=False)
+            self.data = torch.tensor(data, dtype=dtorch.float32, requires_grad=False)
                 # requires_grad=False prevents pytorch from taking up memory by keeping track of its own gradient
         
         # Move tensor to specified device (default to CUDA if available)
@@ -69,6 +68,7 @@ class TritonTensor:
         # Ensures all tensors are on the same GPU device and of the same dtype
         assert self.device == other.device, \
             f'tensors must be on same device but got self.device: {self.device}, other.device: {other.device}'
+        assert self.data.is_contiguous() and other.data.is_contiguous()
 
         # Convert other to Tensor if needed
         other = other if isinstance(other, TritonTensor) else TritonTensor(other)
@@ -117,35 +117,13 @@ class TritonTensor:
             if not self.requires_grad and not other.requires_grad:
                 pass
 
-            if self.shape == other.shape:
-                # if there's no broadcasting being done, then there's no accumulation of gradients being done,
-                #  so therefore it's likely numerically safe to calculate gradients in fp16
-
-                # reusing the same grid from earlier
-                hadamard.binary_op_backward[grid](
-                    self.data, other.data,
-                    self.grad, other.grad, out.grad, 
-                    n_elements, loop_stride,
-                    OP=op, # designates which operation to run (addition, subtraction, multiplication, division
-                )
-            else:
-                # when broadcasting, we'll calculate gradients in fp32 for increased accuracy when accumulating
-                #self_data = self.data.to(torch.float32)
-                #other_data = other.data.to(torch.float32)
-                self_grad = self.grad.to(torch.float32)
-                other_grad = other.grad.to(torch.float32)
-                out_grad = out.grad.to(torch.float32)
-
-                hadamard.binary_op_backward[grid](
-                    self.data, other.data,
-                    self_grad, other_grad, out_grad, 
-                    n_elements, loop_stride,
-                    OP=op, # designates which operation to run (addition, subtraction, multiplication, division
-                )
-
-                self.grad = self_grad.to(torch.float16)
-                other.grad = other_grad.to(torch.float16)
-                out.grad = out_grad.to(torch.float16)
+            # reusing the same grid from earlier
+            hadamard.binary_op_backward[grid](
+                self.data, other.data,
+                self.grad, other.grad, out.grad, 
+                n_elements, loop_stride,
+                OP=op, # designates which operation to run (addition, subtraction, multiplication, division
+            )
 
         out._backward = _backward
         

@@ -5,7 +5,7 @@ import triton.language as tl
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
 autotude_configs = [
-    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE': 4}, num_stages=1, num_warps=4),
 ]
 
 
@@ -74,42 +74,28 @@ def matmul_fwd_m_by_m(
     ideal block and group sizes given the properties of our hardware, such as the number of pid's an SM can handle.
     """
 
-    # ────────────── GUARD AGAINST OUT-OF-RANGE BLOCKS ──────────────
-    # If we are beyond the valid number of blocks in M or N, skip
-    # so we don't do out-of-bounds loads that spoil the accumulator.
-    if pid_m >= tl.cdiv(M, BLOCK_SIZE_M) or pid_n >= tl.cdiv(N, BLOCK_SIZE_N):
-        return
-
     # now we'll create pointer vectors for the first group of blocks of the input matrices
     # a_ptrs is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    offsets_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M #<- not sure why that was originally here, edge case?
+    offsets_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))
     # b_ptrs is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
-    offsets_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N #<- not sure why that was originally here, edge case?
+    offsets_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
     offsets_k = tl.arange(0, BLOCK_SIZE_K) # this is used to setup k dimension of initial a & b offsets
     # now we convert our group/block/pid based indices to their actual tensor mappings using first-entry pointers & stride length
-    a_ptrs = a_ptr + (offsets_am.expand_dims(1) * stride_am + offsets_k.expand_dims(0) * stride_ak)
-    b_ptrs = b_ptr + (offsets_k.expand_dims(1) * stride_bk + offsets_bn.expand_dims(0) * stride_bn)
+    a_ptrs = a_ptr + (offsets_m.expand_dims(1) * stride_am + offsets_k.expand_dims(0) * stride_ak)
+    b_ptrs = b_ptr + (offsets_k.expand_dims(1) * stride_bk + offsets_n.expand_dims(0) * stride_bn)
         
     # iterate to compute a block of the C matrix
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)): # iterate from 0 to the number of blocks along K dimension
-
         # out-of-bounds entries need to be masked out
-        c_mask = offsets_k < K - k * BLOCK_SIZE_K
-        a_mask = (offsets_am.expand_dims(1) < M) & c_mask.expand_dims(0)
-        b_mask = c_mask.expand_dims(1) & (offsets_bn.expand_dims(0) < N)
-            # k * BLOCK_SIZE_K is the current starting index of offsets_k.
-            # so this only really activates when K is within BLOCK_SIZE_K entries from the starting index.
-            # when that does happen, suddenly how K - k * BLOCK_SIZE_K gives us a number of entries <= BLOCK_SIZE_K
-            # meaning anything in offsets_k above this value needs to be masked out.
-            # so this gets triggered on the last iteration of the loop, and only when K is not a multiple of BLOCK_SIZE_K
+        a_mask = (offsets_m.expand_dims(1) < M) & (offsets_k.expand_dims(0) < K)
+        b_mask =(offsets_k.expand_dims(1) < K) & (offsets_n.expand_dims(0) < N)
         
         # Now we load blocks of A and B matrices. If multiple blocks in a group are on the same SM, 
         # they can share these loaded values, which reduces the number of expensive loads from DRAM
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
-            # fill in any masked-out parts with 0.0
-            # 0.0's don't have any effect on the summation in the next step
+            # fill in any masked-out parts with 0.0 which don't have any effect on matmuls
 
         # we accumulate along the K dimension
         accumulator = tl.dot(a, b, accumulator)
@@ -118,54 +104,24 @@ def matmul_fwd_m_by_m(
         # advance the ptrs to the next K block
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+        offsets_k += BLOCK_SIZE_K
 
-    accumulator = accumulator.to(tl.float16)
+    #accumulator = accumulator.to(tl.float16)
 
     # write back the block of the output matrix C with masks
-    offsets_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offsets_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offsets_cm.expand_dims(1) + stride_cn * offsets_cn.expand_dims(0)
-    c_mask = (offsets_cm.expand_dims(1) < M) & (offsets_cn.expand_dims(0) < N)
+    c_ptrs = c_ptr + stride_cm * offsets_m.expand_dims(1) + stride_cn * offsets_n.expand_dims(0)
+    c_mask = (offsets_m.expand_dims(1) < M) & (offsets_n.expand_dims(0) < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
+"""
+we'll use this code later to expand the above kernel into parallelizing across preceeding dimensions like batch
+for now it only supports matrix by matrix
 
+# parallelizing across preceeding dimensions
+pid_preceeding_dims = tl.program_id(axis=1)
+# we split the preceeding dimensions across 
+a_ptr += pid_preceeding_dims * stride_a_preceeding_dims
+b_ptr += pid_preceeding_dims * stride_b_preceeding_dims
+c_ptr += pid_preceeding_dims * stride_c_preceeding_dims
+"""
 
-@triton.autotune(configs = autotude_configs, key=['M', 'N', 'K'])
-@triton.jit
-def matmul_fwd_t_by_t(
-    a_ptr, b_ptr, c_ptr, # pointers to first entries of matrices
-    M, N, K, # matrix dimensions
-    stride_a_preceeding_dims, stride_am, stride_ak, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
-    stride_b_preceeding_dims, stride_bk, stride_bn, 
-    stride_c_preceeding_dims, stride_cm, stride_cn,
-    # meta-parameters
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
-):
-    # parallelizing across preceeding dimensions
-    pid_preceeding_dims = tl.program_id(axis=1)
-    # we split the preceeding dimensions across 
-    a_ptr += pid_preceeding_dims * stride_a_preceeding_dims
-    b_ptr += pid_preceeding_dims * stride_b_preceeding_dims
-    c_ptr += pid_preceeding_dims * stride_c_preceeding_dims
-
-    return
-
-
-autotude_configs = [
-    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=5, num_warps=2),
-    triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=5, num_warps=2)
-]
-@triton.autotune(configs = autotude_configs, key=['M', 'N', 'K'])
-@triton.jit
-def matmul_bwd(
-    a_ptr, b_ptr, c_ptr, # pointers to first entries of matrices
-    M, N, K, # matrix dimensions
-    stride_a_preceeding_dims, stride_am, stride_ak, # how much to increase the ptr by when moving by 1 element along that dimension
-    stride_b_preceeding_dims, stride_bk, stride_bn, # ex: increase b_ptr by stride_bk to get the element one row down (B has K rows)
-    stride_c_preceeding_dims, stride_cm, stride_cn,
-    # meta-parameters
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
-):
-    return
