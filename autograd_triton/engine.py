@@ -172,7 +172,7 @@ class TritonTensor:
         parallel_matrix_ct = prod(self.shape[:-2]) if self.ndim > 2 else 1
 
         # allocates output
-        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=self.dtype)
+        out = torch.empty(self.shape[:-2] + (m, n), device=self.device, dtype=torch.float32)
 
         # 2D launch kernel where each preceeding_dim and each block gets its own program
         grid = lambda meta: (
@@ -180,6 +180,14 @@ class TritonTensor:
             parallel_matrix_ct
             )
         
+        matmul.matmul_fwd[grid](
+            self.data, other.data, out,
+            m, n, k,
+            self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1), # the jump necessary to go from one element to the next one in that dimension
+            other.data.stride(-3) if other.ndim > 2 else 0, other.data.stride(-2), other.data.stride(-1),
+            out.stride(-3) if out.ndim > 2 else 0, out.stride(-2), out.stride(-1),
+        )
+        """
         if self.ndim == 2: # if A and B are both matrices
             # here we're doing matrix by matrix matmul, which doesn't actually get used by a GPT, it's just here as a first step
             matmul.matmul_fwd_m_by_m[grid](
@@ -200,13 +208,14 @@ class TritonTensor:
             )
         else: # if A is a tensor and B is a matrix
             # here we're doing tensor by matrix matmul, which gets used for all linear layers
-            matmul.matmul_fwd_t_by_m[grid](
+            matmul.matmul_fwd_t_by_t[grid](
                 self.data, other.data, out,
                 m, n, k,
                 self.data.stride(-3), self.data.stride(-2), self.data.stride(-1), 
-                other.data.stride(0), other.data.stride(1),
+                0, other.data.stride(-2), other.data.stride(-1),
                 out.stride(-3), out.stride(-2), out.stride(-1),
             )
+        """
         
         # Wrap output in Tensor with autograd information
         out = TritonTensor(

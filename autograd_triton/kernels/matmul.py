@@ -4,30 +4,36 @@ import triton.language as tl
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
-autotune_configs = \
-    [triton.Config(
-        {'BLOCK_SIZE_M': bm, 'BLOCK_SIZE_N': bn, 'BLOCK_SIZE_K': bk, 'GROUP_SIZE': gs}, 
-        num_stages=ns, num_warps=nw)
-    for bm in [32, 64, 128, 256]
-    for bn in [32, 64, 128, 256]
-    for bk in [32, 64]
-    for gs in [4, 8]
-    for ns in [1, 3, 4, 7]
-    for nw in [2, 4, 8]]
-
+autotune_configs = [
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE': 8}, num_stages=3, num_warps=8),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=5, num_warps=2),
+    triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE': 8}, num_stages=5, num_warps=2)
+]
 
 @triton.autotune(configs = autotune_configs, key=['M', 'N', 'K'])
 @triton.jit
-def matmul_fwd_m_by_m(
+def matmul_fwd(
     a_ptr, b_ptr, c_ptr, # pointers to first entries of matrices
     M, N, K, # matrix dimensions
-    stride_am, stride_ak, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
-    stride_bk, stride_bn, 
-    stride_cm, stride_cn,
+    stride_a_preceeding_dims, stride_am, stride_ak, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
+    stride_b_preceeding_dims, stride_bk, stride_bn, 
+    stride_c_preceeding_dims, stride_cm, stride_cn,
     # meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
 ):
+    # parallelizing across preceeding dimensions
+    pid_preceeding_dims = tl.program_id(axis=1)
+    # we split the preceeding dimensions across 
+    a_ptr += pid_preceeding_dims * stride_a_preceeding_dims
+    b_ptr += pid_preceeding_dims * stride_b_preceeding_dims
+    c_ptr += pid_preceeding_dims * stride_c_preceeding_dims
+
     # first we map program ids (pids) to the block of C it should compute
     # this is done in grouped ordering to promote SRAM data reuse (pids within a group share data along k dimension)
     # for a visual see https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -113,22 +119,7 @@ def matmul_fwd_m_by_m(
         b_ptrs += BLOCK_SIZE_K * stride_bk
         offsets_k += BLOCK_SIZE_K
 
-    accumulator = accumulator.to(tl.float16)
-
     # write back the block of the output matrix C with masks
     c_ptrs = c_ptr + stride_cm * offsets_m.expand_dims(1) + stride_cn * offsets_n.expand_dims(0)
     c_mask = (offsets_m.expand_dims(1) < M) & (offsets_n.expand_dims(0) < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
-
-"""
-we'll use this code later to expand the above kernel into parallelizing across preceeding dimensions like batch
-for now it only supports matrix by matrix
-
-# parallelizing across preceeding dimensions
-pid_preceeding_dims = tl.program_id(axis=1)
-# we split the preceeding dimensions across 
-a_ptr += pid_preceeding_dims * stride_a_preceeding_dims
-b_ptr += pid_preceeding_dims * stride_b_preceeding_dims
-c_ptr += pid_preceeding_dims * stride_c_preceeding_dims
-"""
-
