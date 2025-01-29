@@ -89,7 +89,8 @@ class TritonTensor:
                 if ptr == other.ndim: break
                 if d == other.shape[ptr]:
                     ptr += 1
-            assert ptr == other.ndim, f"for broadcasting to work, all dims in x ({x.shape}) must be a subset of those in y ({y.shape})"
+            assert ptr == other.ndim, \
+            f"for broadcasting to work, all dims in a ({self.shape}) must be a subset of those in b ({other.shape})"
         # TODO is this restriction good enough? am i missing something?
         
         # Preallocating the output
