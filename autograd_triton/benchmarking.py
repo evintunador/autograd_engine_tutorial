@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from engine import TritonTensor
-from kernels import hadamard
+from kernels import hadamard, matmul
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 BATCH, N_HEADS, SEQ_LEN, DIM = 32, 8, 1024, 64 # LOWER THESE IF YOU DON'T HAVE ENOUGH RAM
@@ -20,7 +20,7 @@ class _hadamard(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, a, b, op_name): 
-        """a simple hadamard (entry-wise) operation that supports broadcasting of `other` up to size `self`"""
+        """a simple hadamard (entry-wise) operation that supports broadcasting of `b` up to size `a`"""
         # Ensures all tensors are on the same GPU device and of the same dtype
         assert a.device == b.device
         assert a.is_contiguous() and b.is_contiguous()
@@ -293,6 +293,92 @@ def benchmark_div(total_elements, provider,
 ########################### Matrix Multiplication ############################################
 ########################################################################################
 
+class _matmul(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, a, b): 
+        """
+        matmul implementation built to support only the shapes we need, so
+        A: tensor @ B: tensor = C: tensor   for the self-attention mechanism and
+        A: tensor @ B: matrix = C: tensor   for linear layers
+        also we don't need this regular matmul shape layout, but hey why not
+        A: matrix @ B: matrix = C: matrix
+        """
+        # check constraints
+        assert a.ndim >=2 and b.ndim >= 2
+        assert a.ndim >= b.ndim
+        assert a.shape[-2] == b.shape[-1]
+        if b.ndim > 2:
+            assert a.shape[:-2] == b.shape[:-2]
+        assert a.data.is_contiguous()
+
+        # getting the total number of entries of each of our inputs
+        n_elements = a.numel()
+        loop_stride = b.numel() 
+
+        # get matrix dimension lengths
+        (m, k), n = a.shape[-2:], b.shape[-1]
+        # how many batches and heads to parallelize along
+        parallel_matrix_ct = prod(a.shape[:-2]) if a.ndim > 2 else 1
+
+        # allocates output
+        c = torch.empty(a.shape[:-2] + (m, n), device=a.device, dtype=torch.float32)
+
+        # 2D launch kernel where each preceeding_dim and each block gets its own program
+        grid = lambda meta: (
+            triton.cdiv(m, meta['BLOCK_SIZE_M']) * triton.cdiv(n, meta['BLOCK_SIZE_N']), 
+            parallel_matrix_ct
+        )
+        # Launch kernel
+        matmul.matmul_fwd[grid](
+            a, b, c,
+            m, n, k,
+            a.stride(-3) if a.ndim > 2 else 0, a.stride(-2), a.stride(-1),
+            b.stride(-3) if b.ndim > 2 else 0, b.stride(-2), b.stride(-1),
+            c.stride(-3) if c.ndim > 2 else 0, c.stride(-2), c.stride(-1),
+        )
+
+        ctx.save_for_backward(a, b)
+        ctx.m = m
+        ctx.n = n
+        ctx.k = k
+        ctx.parallel_matrix_ct = parallel_matrix_ct
+        return c
+
+    @staticmethod
+    def backward(ctx, dc):
+        a, b = ctx.saved_tensors
+        da = torch.empty_like(a)
+        db = torch.empty_like(b)
+        
+        bwd_grid_dA = lambda meta: (
+            triton.cdiv(ctx.m, meta['BLOCK_SIZE_M']) * triton.cdiv(ctx.k, meta['BLOCK_SIZE_K']),
+            ctx.parallel_matrix_ct
+        )
+        matmul.matmul_bwd_dA[bwd_grid_dA](
+            b, da, db,
+            ctx.m, ctx.n, ctx.k,
+            b.stride(-3) if b.ndim > 2 else 0, b.stride(-2), b.stride(-1),
+            da.stride(-3) if da.ndim > 2 else 0, da.stride(-2), da.stride(-1),
+            db.stride(-3) if db.ndim > 2 else 0, db.stride(-2), db.stride(-1),
+        )
+
+        bwd_grid_dB = lambda meta: (
+            triton.cdiv(ctx.k, meta['BLOCK_SIZE_K']) * triton.cdiv(ctx.n, meta['BLOCK_SIZE_N']),
+            ctx.parallel_matrix_ct
+        )
+        matmul.matmul_bwd_dB[bwd_grid_dA](
+            a, db, dc, 
+            ctx.m, ctx.n, ctx.k,
+            a.stride(-3) if a.ndim > 2 else 0, a.stride(-2), a.stride(-1),
+            db.stride(-3) if db.ndim > 2 else 0, db.stride(-2), db.stride(-1),
+            dc.stride(-3) if dc.ndim > 2 else 0, dc.stride(-2), dc.stride(-1),
+        )
+
+        return da, db
+
+matmul_fn = _matmul.apply
+
 # Create "matmul" configs
 matmul_configs = []
 for mode in ["fwd", "bwd"]:
@@ -300,7 +386,7 @@ for mode in ["fwd", "bwd"]:
         matmul_configs.append(
             triton.testing.Benchmark(
                 x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                x_vals=[2**i for i in range(6, 14, 1)],  # Different input sizes
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
@@ -319,14 +405,17 @@ def benchmark_matmul(total_elements, provider,
                   broadcasting,
                   device=DEVICE):
     shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device) for shape in shapes]
+    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
     # TODO fix shape and TFLOP calculation to make sense w/ each other
     
     if provider == 'torch':
         fn = lambda: torch_fn(*inputs)
     else:
-        triton_inputs = [TritonTensor(x) for x in inputs]
-        fn = lambda: triton_fn(*triton_inputs)
+        fn = lambda: triton_fn(*inputs)
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO, retain_graph=True)
     
     ms = triton.testing.do_bench(fn)
     flops = sum(2 * prod(shape) for shape in shapes)
@@ -408,10 +497,10 @@ if __name__ == "__main__":
 
     if args.all or args.matmul:
         print("\nRunning matmul benchmarks...")
-        def triton_matmul(x, y): return x@ y
+        def triton_matmul(x, y): return matmul_fn(x, y)
         def torch_matmul(x, y): return x @ y
         def matmul_shapes(size, broadcasting):
-            return [(size, size, size // 2), (size // 2, size)] if broadcasting else [(size, size // 2), (size // 2, size * 2)]
+            return [(size, size, size), (size, size)] if broadcasting else [(size, size), (size, size)]
             # TODO fix TFLOPS calculation in graphs
         benchmark_matmul.run(
             print_data=True,
