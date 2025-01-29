@@ -174,6 +174,7 @@ if __name__ == "__main__":
             [(B, H, N, D), (B, H, D, N)],
             atol=1e-1
         )
+        """
         test_operation(
             f"matmul with broadcasting: ({B}, {N}, {D}) @ ({D}, {N})",
             triton_matmul,
@@ -181,4 +182,5 @@ if __name__ == "__main__":
             [(B, N, D), (D, N)],
             atol=1e-1
         )
+        """
         

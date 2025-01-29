@@ -198,25 +198,31 @@ class TritonTensor:
         # define our backward pass
         def _backward():
             # Only run backward kernel if at least one input requires grad
-            if not self.requires_grad and not other.requires_grad:
-                pass
-            
-            bwd_grid = lambda meta: (
-                max(triton.cdiv(m, meta['BLOCK_SIZE_M']), triton.cdiv(k, meta['BLOCK_SIZE_K'])) *\
-                max(triton.cdiv(n, meta['BLOCK_SIZE_N']), triton.cdiv(k, meta['BLOCK_SIZE_K'])),
-                parallel_matrix_ct
-            )
-            matmul.matmul_bwd[bwd_grid](
-                self.data, other.data, out,
-                self.grad, other.grad, out.grad, 
-                m, n, k,
-                self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1),
-                other.data.stride(-3) if other.ndim > 2 else 0, other.data.stride(-2), other.data.stride(-1),
-                out.stride(-3) if out.ndim > 2 else 0, out.stride(-2), out.stride(-1),
-                self.grad.stride(-3) if self.ndim > 2 else 0, self.grad.stride(-2), self.grad.stride(-1),
-                other.grad.stride(-3) if other.ndim > 2 else 0, other.grad.stride(-2), other.grad.stride(-1),
-                out.grad.stride(-3) if out.ndim > 2 else 0, out.grad.stride(-2), out.grad.stride(-1),
-            )
+            if self.requires_grad:
+                bwd_grid_dA = lambda meta: (
+                    triton.cdiv(m, meta['BLOCK_SIZE_M']) * triton.cdiv(k, meta['BLOCK_SIZE_K']),
+                    parallel_matrix_ct
+                )
+                matmul.matmul_bwd_dA[bwd_grid_dA](
+                    other.data, self.grad, out.grad,
+                    m, n, k,
+                    other.data.stride(-3) if other.ndim > 2 else 0, other.data.stride(-2), other.data.stride(-1),
+                    self.grad.stride(-3) if self.ndim > 2 else 0, self.grad.stride(-2), self.grad.stride(-1),
+                    out.grad.stride(-3) if out.ndim > 2 else 0, out.grad.stride(-2), out.grad.stride(-1),
+                )
+
+            if other.requires_grad:
+                bwd_grid_dB = lambda meta: (
+                    triton.cdiv(k, meta['BLOCK_SIZE_K']) * triton.cdiv(n, meta['BLOCK_SIZE_N']),
+                    parallel_matrix_ct
+                )
+                matmul.matmul_bwd_dB[bwd_grid_dA](
+                    self.data, other.grad, out.grad, 
+                    m, n, k,
+                    self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1),
+                    other.grad.stride(-3) if other.ndim > 2 else 0, other.grad.stride(-2), other.grad.stride(-1),
+                    out.grad.stride(-3) if out.ndim > 2 else 0, out.grad.stride(-2), out.grad.stride(-1),
+                )
         out._backward = _backward
 
         return out
