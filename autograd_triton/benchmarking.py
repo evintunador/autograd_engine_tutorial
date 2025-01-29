@@ -14,7 +14,7 @@ BATCH, N_HEADS, SEQ_LEN, DIM = 32, 8, 1024, 64 # LOWER THESE IF YOU DON'T HAVE E
 
 
 addition_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["fwd"]:
     for broadcasting in [True, False]:
         addition_configs.append(
             triton.testing.Benchmark(
@@ -57,6 +57,10 @@ def benchmark_addition(total_elements, provider,
     else:
         triton_inputs = [TritonTensor(x) for x in inputs]
         fn = lambda: triton_fn(*triton_inputs)
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO)#, retain_graph=True) # since our TritonTensor.backward() doesn't have argument retain_graph
     
     # Benchmark
     ms = triton.testing.do_bench(fn)
@@ -68,7 +72,7 @@ def benchmark_addition(total_elements, provider,
 
 # Create "sub" configs
 sub_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["fwd"]:
     for broadcasting in [True, False]:
         sub_configs.append(
             triton.testing.Benchmark(
@@ -106,7 +110,7 @@ def benchmark_sub(total_elements, provider,
 
 # Create "mul" configs
 mul_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["fwd"]:
     for broadcasting in [True, False]:
         mul_configs.append(
             triton.testing.Benchmark(
@@ -144,7 +148,7 @@ def benchmark_mul(total_elements, provider,
 
 # Create "div" configs
 div_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["fwd"]:
     for broadcasting in [True, False]:
         div_configs.append(
             triton.testing.Benchmark(
@@ -182,7 +186,7 @@ def benchmark_div(total_elements, provider,
 
 # Create "matmul" configs
 matmul_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["fwd"]:
     for broadcasting in [True, False]:
         div_configs.append(
             triton.testing.Benchmark(
