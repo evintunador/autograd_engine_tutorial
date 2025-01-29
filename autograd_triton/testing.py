@@ -145,15 +145,13 @@ if __name__ == "__main__":
             f"division: ({B}, {N}, {D}) + ({B}, {N}, {D})",
             triton_div,
             torch_div,
-            [(B, N, D), (B, N, D)],
-            atol=5e-2,
+            [(B, N, D), (B, N, D)]
         )
         test_operation(
             f"division with broadcasting: ({B}, {N}, {D}) + ({D})",
             triton_div,
             torch_div,
-            [(B, N, D), (D)],
-            atol=5e-2,
+            [(B, N, D), (D)]
         )
 
     ### MATMUL
@@ -164,23 +162,19 @@ if __name__ == "__main__":
             f"matmul: ({N}, {D}) @ ({D}, {N})",
             triton_matmul,
             torch_matmul,
-            [(N, D), (D, N)],
-            atol=1e-1
+            [(N, D), (D, N)]
         )
         test_operation(
             f"matmul with leading dimensions: ({B}, {H}, {N}, {D}) @ ({B}, {H}, {D}, {N})",
             triton_matmul,
             torch_matmul,
-            [(B, H, N, D), (B, H, D, N)],
-            atol=1e-1
+            [(B, H, N, D), (B, H, D, N)]
         )
-        """
         test_operation(
             f"matmul with broadcasting: ({B}, {N}, {D}) @ ({D}, {N})",
             triton_matmul,
             torch_matmul,
-            [(B, N, D), (D, N)],
-            atol=1e-1
+            [(B, N, D), (D, N)]
         )
-        """
+        
         
