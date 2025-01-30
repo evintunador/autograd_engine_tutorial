@@ -10,17 +10,17 @@ from engine import TritonTensor
 from kernels import hadamard, matmul
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
-BATCH, N_HEADS, SEQ_LEN, DIM = 32, 8, 1024, 64 # LOWER THESE IF YOU DON'T HAVE ENOUGH RAM
+BATCH = 32
 
 ########################################################################################
-########################### Elementwise Operations ############################################
+########################### Elementwise Binary Operations ##############################
 ########################################################################################
 
 class _hadamard(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, a, b, op_name): 
-        """a simple hadamard (entry-wise) operation that supports broadcasting of `b` up to size `a`"""
+        """a simple hadamard (entry-wise) operation that supports broadcasting of `b` up to tot_elements `a`"""
         # Ensures all tensors are on the same GPU device and of the same dtype
         assert a.device == b.device
         assert a.is_contiguous() and b.is_contiguous()
@@ -73,107 +73,82 @@ class _hadamard(torch.autograd.Function):
         )
         return da, db, None
 
-
 hadamard_fn = _hadamard.apply
 
-########################################################################################
-########################### Elementwise Addition ############################################
-########################################################################################
 
 addition_configs = []
 for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         addition_configs.append(
             triton.testing.Benchmark(
-                x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                x_names=['tot_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(12, 24, 1)],  # Different input tot_elementss
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='TFLOPS',  # Label name for y-axis
+                ylabel='GB/s',  # Label name for y-axis
                 xlabel="Total Elements (millions)", # Label name for x-axis
                 plot_name=f'add_{mode}_broadcasting={broadcasting}',  # Name for plot
                 args={"mode": mode, "broadcasting": broadcasting,},
             ))
 @triton.testing.perf_report(addition_configs)
-def benchmark_addition(total_elements, provider,
-                       triton_fn, torch_fn,
-                       input_shapes_fn,
-                       mode,
-                       broadcasting,
-                       device=DEVICE):
+def benchmark_add(tot_elements, provider, mode, broadcasting, device=DEVICE):
     """
     Benchmark Triton addition against PyTorch.
     
     Args:
-        total_elements: Total number of elements in the tensors
+        tot_elements: Total number of elements in the tensors
         provider: 'torch' or 'triton'
-        triton_fn: Triton implementation
-        torch_fn: PyTorch implementation
-        input_shapes_fn: Function that takes size and returns list of input shapes
+        mode: TODO
+        broadcasting: TODO
         device: Device to run on
     """
-    # Generate input shapes and data
-    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
+    # Generate input data
+    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
+    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
     
     # Select implementation
-    if provider == 'torch':
-        fn = lambda: torch_fn(*inputs)
-    else:
-        fn = lambda: triton_fn(*(inputs + ["add"]))
+    fn = lambda: hadamard_fn(A, B, "add") if provider == 'triton' else A + B
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
         fn = lambda: O.backward(dO, retain_graph=True)
     
     # Benchmark
+    # for entry-wise operations we'll measure memory throughput since that's the limiting factor
+    # 3 = number of memory operations (2 reads + 1 write)
+    # 4) = bytes per element (for float32)
+    # 1e-9 converts bytes to GB
+    # 1e-3 converts ms to seconds
     ms = triton.testing.do_bench(fn)
-    
-    # TODO make TFLOPS calc a function that you pass in, and separate it between forward & backward
-    # Calculate TFLOPS
-    flops = sum(2 * prod(shape) for shape in shapes)  # Adjust FLOPS calculation per operation
-    return flops * 1e-12 / (ms * 1e-3)
+    return BATCH * 3 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
 
-########################################################################################
-########################### Elementwise Subtraction ############################################
-########################################################################################
 
-# Create "sub" configs
 sub_configs = []
 for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         sub_configs.append(
             triton.testing.Benchmark(
-                x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                x_names=['tot_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='TFLOPS',  # Label name for y-axis
+                ylabel='GB/s',  # Label name for y-axis
                 xlabel="Total Elements (millions)", # Label name for x-axis
                 plot_name=f'sub_{mode}_broadcasting={broadcasting}',  # Name for plot
                 args={"mode": mode, "broadcasting": broadcasting,},
             ))
-
 @triton.testing.perf_report(sub_configs)
-def benchmark_sub(total_elements, provider,
-                  triton_fn, torch_fn,
-                  input_shapes_fn,
-                  mode,
-                  broadcasting,
-                  device=DEVICE):
-    # Generate input shapes and data
-    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
+def benchmark_sub(tot_elements, provider, mode, broadcasting, device=DEVICE):
+    # Generate input data
+    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
+    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
     
     # Select implementation
-    if provider == 'torch':
-        fn = lambda: torch_fn(*inputs)
-    else:
-        fn = lambda: triton_fn(*(inputs + ["sub"]))
+    fn = lambda: hadamard_fn(A, B, "sub") if provider == 'triton' else A - B
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -181,50 +156,33 @@ def benchmark_sub(total_elements, provider,
     
     # Benchmark
     ms = triton.testing.do_bench(fn)
-    
-    # TODO make TFLOPS calc a function that you pass in, and separate it between forward & backward
-    # Calculate TFLOPS
-    flops = sum(2 * prod(shape) for shape in shapes)  # Adjust FLOPS calculation per operation
-    return flops * 1e-12 / (ms * 1e-3)
+    return BATCH * 3 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
 
-########################################################################################
-########################### Elementwise Multiplication ############################################
-########################################################################################
 
-# Create "mul" configs
 mul_configs = []
 for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         mul_configs.append(
             triton.testing.Benchmark(
-                x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                x_names=['tot_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='TFLOPS',  # Label name for y-axis
+                ylabel='GB/s',  # Label name for y-axis
                 xlabel="Total Elements (millions)", # Label name for x-axis
                 plot_name=f'mul_{mode}_broadcasting={broadcasting}',  # Name for plot
                 args={"mode": mode, "broadcasting": broadcasting,},
             ))
-
 @triton.testing.perf_report(mul_configs)
-def benchmark_mul(total_elements, provider,
-                  triton_fn, torch_fn,
-                  input_shapes_fn,
-                  mode,
-                  broadcasting,
-                  device=DEVICE):
-    # Generate input shapes and data
-    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
+def benchmark_mul(tot_elements, provider, mode, broadcasting, device=DEVICE):
+    # Generate input data
+    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
+    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
     
     # Select implementation
-    if provider == 'torch':
-        fn = lambda: torch_fn(*inputs)
-    else:
-        fn = lambda: triton_fn(*(inputs + ["mul"]))
+    fn = lambda: hadamard_fn(A, B, "mul") if provider == 'triton' else A * B
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -232,50 +190,32 @@ def benchmark_mul(total_elements, provider,
     
     # Benchmark
     ms = triton.testing.do_bench(fn)
-    
-    # TODO make TFLOPS calc a function that you pass in, and separate it between forward & backward
-    # Calculate TFLOPS
-    flops = sum(2 * prod(shape) for shape in shapes)  # Adjust FLOPS calculation per operation
-    return flops * 1e-12 / (ms * 1e-3)
+    return BATCH * 6 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
 
-########################################################################################
-########################### Elementwise Division ############################################
-########################################################################################
-
-# Create "div" configs
 div_configs = []
 for mode in ["fwd", "bwd"]:
     for broadcasting in [True, False]:
         div_configs.append(
             triton.testing.Benchmark(
-                x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input sizes
+                x_names=['tot_elements'],  # Argument names to vary
+                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='TFLOPS',  # Label name for y-axis
+                ylabel='GB/s',  # Label name for y-axis
                 xlabel="Total Elements (millions)", # Label name for x-axis
                 plot_name=f'div_{mode}_broadcasting={broadcasting}',  # Name for plot
                 args={"mode": mode, "broadcasting": broadcasting,},
             ))
-
 @triton.testing.perf_report(div_configs)
-def benchmark_div(total_elements, provider,
-                  triton_fn, torch_fn,
-                  input_shapes_fn,
-                  mode,
-                  broadcasting,
-                  device=DEVICE):
-    # Generate input shapes and data
-    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
+def benchmark_div(tot_elements, provider, mode, broadcasting, device=DEVICE):
+    # Generate input data
+    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
+    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
     
     # Select implementation
-    if provider == 'torch':
-        fn = lambda: torch_fn(*inputs)
-    else:
-        fn = lambda: triton_fn(*(inputs + ["div"]))
+    fn = lambda: hadamard_fn(A, B, "div") if provider == 'triton' else A / B
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -283,11 +223,7 @@ def benchmark_div(total_elements, provider,
     
     # Benchmark
     ms = triton.testing.do_bench(fn)
-    
-    # TODO make TFLOPS calc a function that you pass in, and separate it between forward & backward
-    # Calculate TFLOPS
-    flops = sum(2 * prod(shape) for shape in shapes)  # Adjust FLOPS calculation per operation
-    return flops * 1e-12 / (ms * 1e-3)
+    return BATCH * 6 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
 
 ########################################################################################
 ########################### Matrix Multiplication ############################################
@@ -367,7 +303,7 @@ class _matmul(torch.autograd.Function):
             triton.cdiv(ctx.k, meta['BLOCK_SIZE_K']) * triton.cdiv(ctx.n, meta['BLOCK_SIZE_N']),
             ctx.parallel_matrix_ct
         )
-        matmul.matmul_bwd_dB[bwd_grid_dA](
+        matmul.matmul_bwd_dB[bwd_grid_dB](
             a, db, dc, 
             ctx.m, ctx.n, ctx.k,
             a.stride(-3) if a.ndim > 2 else 0, a.stride(-2), a.stride(-1),
@@ -381,45 +317,43 @@ matmul_fn = _matmul.apply
 
 # Create "matmul" configs
 matmul_configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["bwd"]:
     for broadcasting in [True, False]:
         matmul_configs.append(
             triton.testing.Benchmark(
-                x_names=['total_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(6, 14, 1)],  # Different input sizes
+                x_names=['M', 'N', 'K'],  # Argument names to vary
+                x_vals=[128 * i for i in range(2, 28, 1)],  # Different input tot_elementss
                 line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
                 line_vals=['torch', 'triton'],  # Possible values for line_arg
                 line_names=['PyTorch', 'Triton'],  # Label name for different lines
                 styles=[('blue', '-'), ('red', '-')],  # Line styles
                 ylabel='TFLOPS',  # Label name for y-axis
-                xlabel="Total Elements (millions)", # Label name for x-axis
+                xlabel="M, N and K", # Label name for x-axis
                 plot_name=f'matmul_{mode}_broadcasting={broadcasting}',  # Name for plot
                 args={"mode": mode, "broadcasting": broadcasting,},
             ))
-
 @triton.testing.perf_report(matmul_configs)
-def benchmark_matmul(total_elements, provider,
-                  triton_fn, torch_fn,
-                  input_shapes_fn,
-                  mode,
-                  broadcasting,
-                  device=DEVICE):
-    shapes = input_shapes_fn(int(total_elements ** 0.5), broadcasting)  # Take square root for 2D tensors
-    inputs = [torch.randn(shape, device=device, requires_grad=True) for shape in shapes]
-    # TODO fix shape and TFLOP calculation to make sense w/ each other
+def benchmark_matmul(M, N, K, provider, mode, broadcasting, device=DEVICE):
+    A = torch.randn((BATCH, M, K), device=device, requires_grad=True)
+    B = torch.randn((K, N) if broadcasting else (BATCH, K, N), device=device, requires_grad=True)
     
     if provider == 'torch':
-        fn = lambda: torch_fn(*inputs)
-    else:
-        fn = lambda: triton_fn(*inputs)
+        fn = lambda: A @ B
+    else: # triton
+        fn = lambda: matmul_fn(A, B)
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
         fn = lambda: O.backward(dO, retain_graph=True)
     
+    # for matmul we'll measure TFLOPs instead of GB/s since flops are the limiting factor
     ms = triton.testing.do_bench(fn)
-    flops = sum(2 * prod(shape) for shape in shapes)
-    return flops * 1e-12 / (ms * 1e-3)
+    perf = (2 if mode == "fwd" else 4) * BATCH * M * N * K * 1e-12 / (ms * 1e-3)
+    # 2 or 4 = number of operations per entry (mul and add for fwd & another set for two gradients during bwd)
+    # BATCH * M * N * K = number of elements
+    # 1e-12 converts flops to Teraflops
+    # ms * 1e-3 converts milliseconds to seconds
+    return perf 
 
 if __name__ == "__main__":
     import argparse
@@ -438,74 +372,26 @@ if __name__ == "__main__":
     if not any(vars(args).values()):
         parser.print_help()
         exit(0)
+
+    print(f"ATTENTION:\nBENCHMARK tot_elementsS ARE DESIGNED TO FUNCTION WITHIN A LIMIT OF 16GB of VRAM.\n"
+            f"IF YOU HAVE LESS YOU WILL GET ERRORS.\nTO FIX, EDIT x_vals IN EACH BENCHMARK'S CONFIG.")
     
     if args.all or args.add:
         print("\nRunning addition benchmarks...")
-        def triton_add(x, y, op): return hadamard_fn(x, y, op)
-        def torch_add(x, y): return x + y
-        def add_shapes(size, broadcasting): 
-            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)] 
-        benchmark_addition.run(
-            print_data=True,
-            triton_fn=triton_add,
-            torch_fn=torch_add,
-            input_shapes_fn=add_shapes,
-            save_path='./benchmarks/'
-        )
+        benchmark_add.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.sub:
         print("\nRunning subtraction benchmarks...")
-        def triton_sub(x, y, op): return hadamard_fn(x, y, op)
-        def torch_sub(x, y): return x - y
-        def sub_shapes(size, broadcasting):
-            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-        benchmark_sub.run(
-            print_data=True,
-            triton_fn=triton_sub,
-            torch_fn=torch_sub,
-            input_shapes_fn=sub_shapes,
-            save_path='./benchmarks/'
-        )
+        benchmark_sub.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.mul:
         print("\nRunning multiplication benchmarks...")
-        def triton_mul(x, y, op): return hadamard_fn(x, y, op)
-        def torch_mul(x, y): return x * y
-        def mul_shapes(size, broadcasting):
-            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-        benchmark_mul.run(
-            print_data=True,
-            triton_fn=triton_mul,
-            torch_fn=torch_mul,
-            input_shapes_fn=mul_shapes,
-            save_path='./benchmarks/'
-        )
+        benchmark_mul.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.div:
         print("\nRunning division benchmarks...")
-        def triton_div(x, y, op): return hadamard_fn(x, y, op)
-        def torch_div(x, y): return x / y
-        def div_shapes(size, broadcasting):
-            return [(size, size), (size,)] if broadcasting else [(size, size), (size, size)]
-        benchmark_div.run(
-            print_data=True,
-            triton_fn=triton_div,
-            torch_fn=torch_div,
-            input_shapes_fn=div_shapes,
-            save_path='./benchmarks/'
-        )
+        benchmark_div.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.matmul:
         print("\nRunning matmul benchmarks...")
-        def triton_matmul(x, y): return matmul_fn(x, y)
-        def torch_matmul(x, y): return x @ y
-        def matmul_shapes(size, broadcasting):
-            return [(size, size, size), (size, size)] if broadcasting else [(size, size), (size, size)]
-            # TODO fix TFLOPS calculation in graphs
-        benchmark_matmul.run(
-            print_data=True,
-            triton_fn=triton_matmul,
-            torch_fn=torch_matmul,
-            input_shapes_fn=matmul_shapes,
-            save_path='./benchmarks/'
-        )
+        benchmark_matmul.run(print_data=True, save_path='./benchmarks/')
