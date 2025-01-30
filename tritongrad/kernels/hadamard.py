@@ -20,7 +20,7 @@ def binary_op_forward(
     output_ptr,                 # ptr to output vector
     n_elements,                 # size of x tensor
     loop_stride,                # size of y tensor
-    OP: tl.constexpr,           # the operation to be performed
+    OP: tl.constexpr,           # known at compile-time so a different kernel gets created for every operation
     BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
 ):   
     # tl.constexpr is a type that tells the compiler that the value must be known at compile-time (not runtime)
@@ -72,6 +72,116 @@ def binary_op_forward(
     # write back to DRAM, being sure to mask to avoid out-of-bounds accesses
     tl.store(output_ptr + offsets_x, out, mask = mask_x)
 
+
+
+@triton.autotune( # decorator figures out what meta-parameters will be most efficient
+    [
+        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE in [32, 64]#, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["n_elements", "loop_stride"], # auto-tune will re-run every time either of these values are different in a new input
+)
+@triton.jit
+def binary_op_backward_dx(
+    y_ptr,               
+    dx_ptr,             
+    do_ptr,                     # pointer to incoming gradient
+    n_elements,                 # total number of elements in x and output tensors
+    loop_stride,                # total number of elements in y tensor
+    OP: tl.constexpr,           # known at compile-time so a different kernel gets created for every operation
+    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
+):
+    # Get program ID
+    pid = tl.program_id(axis=0)
+
+    # Calculate starting offset for this program instance
+    block_start_x = pid * BLOCK_SIZE
+    offsets_x = block_start_x + tl.arange(0, BLOCK_SIZE)
+    
+    # Create masks to guard memory operations
+    mask_x = offsets_x < n_elements
+    
+    # Load incoming gradient & target gradient
+    do = tl.load(do_ptr + offsets_x, mask=mask_x)
+    dx = tl.load(dx_ptr + offsets_x, mask=mask_x)
+
+    if OP == "add":
+        dx += do
+    elif OP == "sub":
+        dx += do
+    else: 
+        # prep for mul or div
+        block_start_y = block_start_x % loop_stride # the looping is how we handle broadcasting
+        offsets_y = (block_start_y + tl.arange(0, BLOCK_SIZE)) % loop_stride
+        mask_y = offsets_y < loop_stride
+        y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+
+        if OP == "mul":
+            dx += do * y_val
+        if OP == "div":
+            # x / y => dx = (1 / y) * do
+            dx += do / y_val
+
+    tl.store(dx_ptr + offsets_x, dx, mask=mask_x)
+    
+
+
+@triton.autotune( # decorator figures out what meta-parameters will be most efficient
+    [
+        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE in [32, 64]#, 128, 256, 512, 1024, 2048, 4096] # values chosen by totally guessing
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["n_elements", "loop_stride"], # auto-tune will re-run every time either of these values are different in a new input
+)
+@triton.jit
+def binary_op_backward_dy(
+    x_ptr, y_ptr,               # pointers to input vectors
+    dy_ptr,             # pointer to each input's gradient, or None if y doesn't require a gradient
+    do_ptr,                     # pointer to incoming gradient
+    n_elements,                 # total number of elements in x and output tensors
+    loop_stride,                # total number of elements in y tensor
+    OP: tl.constexpr,           # known at compile-time so a different kernel gets created for every operation
+    BLOCK_SIZE: tl.constexpr,   # number of elements each program should process
+):
+    # Get program ID
+    pid = tl.program_id(axis=0)
+
+    # Calculate starting offset for this program instance
+    block_start_x = pid * BLOCK_SIZE
+    block_start_y = block_start_x % loop_stride # the looping is how we handle broadcasting
+    offsets_x = block_start_x + tl.arange(0, BLOCK_SIZE)
+    offsets_y = (block_start_y + tl.arange(0, BLOCK_SIZE)) % loop_stride
+    
+    # Create masks to guard memory operations
+    mask_x = offsets_x < n_elements
+    mask_y = offsets_y < loop_stride
+    
+    # Load incoming gradient do
+    do = tl.load(do_ptr + offsets_x, mask=mask_x)
+    
+    # if we were to use the same code as the kernel above, then in the case of broadcasting the threads would be
+    #  overwriting each other. instead, we use atomic_add which uses a locking mechanism to ensure
+    #  that only one thread works on a given entry in dy at a time
+    if OP == "add":
+        tl.atomic_add(dy_ptr + offsets_y, do, mask=mask_y)
+    elif OP == "sub":
+        tl.atomic_add(dy_ptr + offsets_y, -do, mask=mask_y)
+    else:
+        # prep for mul or div
+        x_val = tl.load(x_ptr + offsets_x, mask=mask_x)
+
+        if OP == "mul":
+            # dy = do * x
+            tl.atomic_add(dy_ptr + offsets_y, x_val * do, mask=mask_y)
+        elif OP == "div":
+            # out = x / y => dy = -(x*do)/y^2
+            y_val = tl.load(y_ptr + offsets_y, mask=mask_y)
+            partial_dy = -x_val * do / (y_val * y_val)
+            tl.atomic_add(dy_ptr + offsets_y, partial_dy, mask=mask_y)
 
 @triton.autotune( # decorator figures out what meta-parameters will be most efficient
     [

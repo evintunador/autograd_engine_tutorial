@@ -114,17 +114,22 @@ class TritonTensor:
         
         # define our backward pass
         def _backward():
-            # Only run backward kernel if at least one input requires grad
-            if not self.requires_grad and not other.requires_grad:
-                pass
-
-            # reusing the same grid from earlier
-            hadamard.binary_op_backward[grid](
-                self.data, other.data,
-                self.grad, other.grad, out.grad, 
-                n_elements, loop_stride,
-                OP=op, # designates which operation to run (addition, subtraction, multiplication, division
-            )
+            if self.requires_grad:
+                hadamard.binary_op_backward_dx[grid](
+                    other.data,
+                    self.grad,
+                    out.grad, 
+                    n_elements, loop_stride,
+                    OP=op, 
+                )
+            if self.requires_grad:
+                hadamard.binary_op_backward_dy[grid](
+                    self.data, other.data,
+                    other.grad, 
+                    out.grad, 
+                    n_elements, loop_stride,
+                    OP=op, 
+                )
 
         out._backward = _backward
         
