@@ -20,9 +20,9 @@ autotune_configs = [
 def matmul_fwd(
     a_ptr, b_ptr, c_ptr, # pointers to first entries of matrices
     M, N, K, # matrix dimensions
-    stride_a_preceeding_dims, stride_am, stride_ak, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
-    stride_b_preceeding_dims, stride_bk, stride_bn, 
-    stride_c_preceeding_dims, stride_cm, stride_cn,
+    stride_a_preceeding_dims, stride_a_m, stride_a_k, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
+    stride_b_preceeding_dims, stride_b_k, stride_b_n, 
+    stride_c_preceeding_dims, stride_c_m, stride_c_n,
     # meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
@@ -94,8 +94,8 @@ def matmul_fwd(
     offsets_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))
     offsets_k = tl.arange(0, BLOCK_SIZE_K) # this is used to setup k dimension of initial a & b offsets
     # now we convert our group/block/pid based indices to their actual tensor mappings using first-entry pointers & stride length
-    a_ptrs = a_ptr + (offsets_m.expand_dims(1) * stride_am + offsets_k.expand_dims(0) * stride_ak)
-    b_ptrs = b_ptr + (offsets_k.expand_dims(1) * stride_bk + offsets_n.expand_dims(0) * stride_bn)
+    a_ptrs = a_ptr + (offsets_m.expand_dims(1) * stride_a_m + offsets_k.expand_dims(0) * stride_a_k)
+    b_ptrs = b_ptr + (offsets_k.expand_dims(1) * stride_b_k + offsets_n.expand_dims(0) * stride_b_n)
         
     # iterate to compute a block of the C matrix
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -115,12 +115,12 @@ def matmul_fwd(
             # triton is weird with operation notation; this is actually a tiny matmul not just a dot product
 
         # advance the ptrs to the next K block
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        a_ptrs += BLOCK_SIZE_K * stride_a_k
+        b_ptrs += BLOCK_SIZE_K * stride_b_k
         offsets_k += BLOCK_SIZE_K
 
     # write back the block of the output matrix C with masks
-    c_ptrs = c_ptr + stride_cm * offsets_m.expand_dims(1) + stride_cn * offsets_n.expand_dims(0)
+    c_ptrs = c_ptr + stride_c_m * offsets_m.expand_dims(1) + stride_c_n * offsets_n.expand_dims(0)
     c_mask = (offsets_m.expand_dims(1) < M) & (offsets_n.expand_dims(0) < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
@@ -130,9 +130,9 @@ def matmul_fwd(
 def matmul_bwd_dA(
     b_ptr, da_ptr, dc_ptr, 
     M, N, K, # matrix dimensions
-    stride_b_preceeding_dims, stride_bk, stride_bn, 
-    stride_da_preceeding_dims, stride_dam, stride_dak,
-    stride_dc_preceeding_dims, stride_dcm, stride_dcn,
+    stride_b_preceeding_dims, stride_b_k, stride_b_n, 
+    stride_da_preceeding_dims, stride_da_m, stride_da_k,
+    stride_dc_preceeding_dims, stride_dc_m, stride_dc_n,
     # meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
@@ -178,8 +178,8 @@ def matmul_bwd_dA(
     offsets_n = tl.arange(0, BLOCK_SIZE_N)
 
     # now we convert our group/block/pid based indices to their actual tensor mappings using first-entry pointers & stride length
-    dc_ptrs = dc_ptr + stride_dcm * offsets_m.expand_dims(1) + stride_dcn * offsets_n.expand_dims(0)
-    b_T_ptrs = b_ptr + (offsets_n.expand_dims(1) * stride_bn + offsets_k.expand_dims(0) * stride_bk)
+    dc_ptrs = dc_ptr + offsets_m.expand_dims(1) * stride_dc_m + offsets_n.expand_dims(0) * stride_dc_n
+    b_T_ptrs = b_ptr + offsets_n.expand_dims(1) * stride_b_n + offsets_k.expand_dims(0) * stride_b_k
 
     # iterate to compute a block of the C matrix
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_K), dtype=tl.float32)
@@ -198,12 +198,12 @@ def matmul_bwd_dA(
             # triton is weird with operation notation; this is actually a tiny matmul not just a dot product
 
         # advance the ptrs to the next N block
-        dc_ptrs += BLOCK_SIZE_N * stride_dcn
-        b_T_ptrs += BLOCK_SIZE_N * stride_bn
-        offsets_k += BLOCK_SIZE_N
+        dc_ptrs += BLOCK_SIZE_N * stride_dc_n
+        b_T_ptrs += BLOCK_SIZE_N * stride_b_n
+        offsets_n += BLOCK_SIZE_N
 
     # write back the block of the output matrix dA with masks
-    da_ptrs = da_ptr + (offsets_m.expand_dims(1) * stride_dam + offsets_k.expand_dims(0) * stride_dak)
+    da_ptrs = da_ptr + offsets_m.expand_dims(1) * stride_da_m + offsets_k.expand_dims(0) * stride_da_k
     da_mask = (offsets_m.expand_dims(1) < M) & (offsets_k.expand_dims(0) < K)
     tl.store(da_ptrs, accumulator, mask=da_mask)
 
@@ -213,9 +213,9 @@ def matmul_bwd_dA(
 def matmul_bwd_dB(
     a_ptr, db_ptr, dc_ptr, 
     M, N, K, # matrix dimensions
-    stride_a_preceeding_dims, stride_am, stride_ak, 
-    stride_db_preceeding_dims, stride_dbk, stride_dbn,
-    stride_dc_preceeding_dims, stride_dcm, stride_dcn,
+    stride_a_preceeding_dims, stride_a_m, stride_a_k, 
+    stride_db_preceeding_dims, stride_db_k, stride_db_n,
+    stride_dc_preceeding_dims, stride_dc_m, stride_dc_n,
     # meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
@@ -261,8 +261,8 @@ def matmul_bwd_dB(
     offsets_m = tl.arange(0, BLOCK_SIZE_M)
 
     # now we convert our group/block/pid based indices to their actual tensor mappings using first-entry pointers & stride length
-    a_T_ptrs = a_ptr + (offsets_k.expand_dims(1) * stride_ak + offsets_m.expand_dims(0) * stride_am)
-    dc_ptrs = dc_ptr + stride_dcm * offsets_m.expand_dims(1) + stride_dcn * offsets_n.expand_dims(0)
+    a_T_ptrs = a_ptr + offsets_k.expand_dims(1) * stride_a_k + offsets_m.expand_dims(0) * stride_a_m
+    dc_ptrs = dc_ptr + offsets_m.expand_dims(1) * stride_dc_m + offsets_n.expand_dims(0) * stride_dc_n
 
     # iterate to compute a block of the dB matrix
     accumulator = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=tl.float32)
@@ -280,12 +280,12 @@ def matmul_bwd_dB(
         accumulator = tl.dot(a_T, dc, accumulator)
 
         # advance the ptrs to the next N block
-        a_T_ptrs += BLOCK_SIZE_M * stride_am
-        dc_ptrs += BLOCK_SIZE_M * stride_dcm
+        a_T_ptrs += BLOCK_SIZE_M * stride_a_m
+        dc_ptrs += BLOCK_SIZE_M * stride_dc_m
         offsets_m += BLOCK_SIZE_M
 
     # write back the block of the output matrix dB with masks
-    db_ptrs = db_ptr + (offsets_k.expand_dims(1) * stride_dbk + offsets_n.expand_dims(0) * stride_dbn)
+    db_ptrs = db_ptr + offsets_k.expand_dims(1) * stride_db_k + offsets_n.expand_dims(0) * stride_db_n
     db_mask = (offsets_k.expand_dims(1) < K) & (offsets_n.expand_dims(0) < N)
     tl.store(db_ptrs, accumulator, mask=db_mask)
 

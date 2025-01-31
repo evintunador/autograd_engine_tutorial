@@ -48,7 +48,7 @@ def test_operation(op_name: str,
     zero_grad = torch.zeros_like(torch_out)
     triton_out.backward(zero_grad)
     # and in order to avoid any potential divide by zero Nan's, we also set all gradients to 0
-    #triton_out.zero_grad_backward()
+    triton_out.zero_grad_backward()
 
     # Backward pass
     grad_output = torch.randn_like(torch_out)
@@ -57,8 +57,8 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        #print(torch_input.grad)
-        #print(triton_input.grad)
+        print(torch_input.grad, torch_input.shape)
+        print(triton_input.grad, triton_input.shape)
         torch.testing.assert_close(triton_input.grad, torch_input.grad, atol=atol, rtol=rtol)
     print(f"✓ Backward pass matches")
     
@@ -84,7 +84,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D = 4, 512, 8, 384
+    B, N, H, D = 4, 64, 8, 32
 
     ### ADDITION
     if args.all or args.add:

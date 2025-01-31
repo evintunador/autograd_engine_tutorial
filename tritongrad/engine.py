@@ -222,7 +222,7 @@ class TritonTensor:
                     triton.cdiv(k, meta['BLOCK_SIZE_K']) * triton.cdiv(n, meta['BLOCK_SIZE_N']),
                     parallel_matrix_ct
                 )
-                matmul.matmul_bwd_dB[bwd_grid_dA](
+                matmul.matmul_bwd_dB[bwd_grid_dB](
                     self.data, other.grad, out.grad, 
                     m, n, k,
                     self.data.stride(-3) if self.ndim > 2 else 0, self.data.stride(-2), self.data.stride(-1),
