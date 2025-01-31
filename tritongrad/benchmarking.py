@@ -65,14 +65,6 @@ class _hadamard(torch.autograd.Function):
         da = torch.empty_like(a)
         db = torch.empty_like(b)
         # reusing the same grid from earlier
-        #"""
-        hadamard.binary_op_backward[ctx.grid](
-            a, b,
-            da, db, dc, 
-            ctx.n_elements, ctx.loop_stride,
-            OP=ctx.op_name, # designates which operation to run (addition, subtraction, multiplication, division
-        )
-        """
         hadamard.binary_op_backward_dx[ctx.grid](
             b, da, dc, 
             ctx.n_elements, ctx.loop_stride,
@@ -83,38 +75,56 @@ class _hadamard(torch.autograd.Function):
             ctx.n_elements, ctx.loop_stride,
             OP=ctx.op_name, 
         )
-        #"""
         return da, db, None
 
 hadamard_fn = _hadamard.apply
 
+# Define the operations list based on input args
+def get_hadamard_ops(args):
+    ops = []
+    if args.all or args.add:
+        ops.append("add")
+    if args.all or args.sub:
+        ops.append("sub")
+    if args.all or args.mul:
+        ops.append("mul")
+    if args.all or args.div:
+        ops.append("div")
+    return ops
 
-addition_configs = []
-for mode in ["bwd"]:#"fwd", "bwd"]:
-    for broadcasting in [True, False]:
-        addition_configs.append(
-            triton.testing.Benchmark(
-                x_names=['tot_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(12, 24, 1)],  # Different input tot_elementss
-                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
-                line_vals=['torch', 'triton'],  # Possible values for line_arg
-                line_names=['PyTorch', 'Triton'],  # Label name for different lines
-                styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='GB/s',  # Label name for y-axis
-                xlabel="Total elements per output tensor", # Label name for x-axis
-                plot_name=f'add_{mode}_broadcasting={broadcasting}',  # Name for plot
-                args={"mode": mode, "broadcasting": broadcasting,},
-            ))
-@triton.testing.perf_report(addition_configs)
-def benchmark_add(tot_elements, provider, mode, broadcasting, device=DEVICE):
+# First define an empty list that will be populated before the decorator is used
+hadamard_configs = []
+def generate_hadamard_configs(ops):
+    configs = []
+    for op in ops:
+        for mode in ["fwd", "bwd"]:
+            for broadcasting in [True, False]:
+                configs.append(
+                    triton.testing.Benchmark(
+                        x_names=['tot_elements'],
+                        x_vals=[2**i for i in range(12, 24, 1)],
+                        line_arg='provider',
+                        line_vals=['torch', 'triton'],
+                        line_names=['PyTorch', 'Triton'],
+                        styles=[('blue', '-'), ('red', '-')],
+                        ylabel='GB/s',
+                        xlabel="Total elements per output tensor",
+                        plot_name=f'{op}_{mode}_broadcasting={broadcasting}',
+                        args={"op": op, "mode": mode, "broadcasting": broadcasting,},
+                    ))
+    return configs
+
+@triton.testing.perf_report(hadamard_configs)
+def benchmark_hadamard(tot_elements, provider, op, mode, broadcasting, device=DEVICE):
     """
-    Benchmark Triton addition against PyTorch.
+    Benchmark Triton hadamard operations against PyTorch.
     
     Args:
         tot_elements: Total number of elements in the tensors
         provider: 'torch' or 'triton'
-        mode: TODO
-        broadcasting: TODO
+        op: "add", "sub", "mul", or "div"; designates the operation to be performed
+        mode: "fwd" or "bwd"
+        broadcasting: True for same-size inputs and False for smaller B to be broadcasted
         device: Device to run on
     """
     # Generate input data
@@ -123,7 +133,7 @@ def benchmark_add(tot_elements, provider, mode, broadcasting, device=DEVICE):
     B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
     
     # Select implementation
-    fn = lambda: hadamard_fn(A, B, "add") if provider == 'triton' else A + B
+    fn = lambda: hadamard_fn(A, B, op) if provider == 'triton' else A + B
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -131,116 +141,21 @@ def benchmark_add(tot_elements, provider, mode, broadcasting, device=DEVICE):
     
     # Benchmark
     # for entry-wise operations we'll measure memory throughput since that's the limiting factor
-    # 3 = number of memory operations (2 reads + 1 write)
-    # 4) = bytes per element (for float32)
-    # 1e-9 converts bytes to GB
-    # 1e-3 converts ms to seconds
+    if mode == "fwd": # all fwd passes have same mem read/write behavior
+        gb = BATCH * 3 * tot_elements * 4 * 1e-9
+        # 3 = number of memory operations (2 reads + 1 write)
+        # 4) = bytes per element (for float32)
+        # 1e-9 converts bytes to GB
+    elif op in ("add", "sub"): # bwd pass of add or sub
+        gb = BATCH * 5 * tot_elements * 4 * 1e-9
+    elif op == "mul": # bwd pass of mul
+        gb = BATCH * 7 * tot_elements * 4 * 1e-9
+    else: # bwd div
+        gb = BATCH * 8 * tot_elements * 4 * 1e-9
+    # 1e-3 converts milliseconds to seconds
     ms = triton.testing.do_bench(fn)
-    return BATCH * 3 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
+    return gb / (ms * 1e-3)
 
-
-sub_configs = []
-for mode in ["fwd", "bwd"]:
-    for broadcasting in [True, False]:
-        sub_configs.append(
-            triton.testing.Benchmark(
-                x_names=['tot_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
-                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
-                line_vals=['torch', 'triton'],  # Possible values for line_arg
-                line_names=['PyTorch', 'Triton'],  # Label name for different lines
-                styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='GB/s',  # Label name for y-axis
-                xlabel="Total elements per output tensor", # Label name for x-axis
-                plot_name=f'sub_{mode}_broadcasting={broadcasting}',  # Name for plot
-                args={"mode": mode, "broadcasting": broadcasting,},
-            ))
-@triton.testing.perf_report(sub_configs)
-def benchmark_sub(tot_elements, provider, mode, broadcasting, device=DEVICE):
-    # Generate input data
-    dim = int(tot_elements ** 0.5)
-    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
-    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
-    
-    # Select implementation
-    fn = lambda: hadamard_fn(A, B, "sub") if provider == 'triton' else A - B
-    if mode == "bwd":
-        O = fn()
-        dO = torch.randn_like(O)
-        fn = lambda: O.backward(dO, retain_graph=True)
-    
-    # Benchmark
-    ms = triton.testing.do_bench(fn)
-    return BATCH * 3 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
-
-
-mul_configs = []
-for mode in ["bwd"]:#"fwd", "bwd"]:
-    for broadcasting in [True, False]:
-        mul_configs.append(
-            triton.testing.Benchmark(
-                x_names=['tot_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
-                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
-                line_vals=['torch', 'triton'],  # Possible values for line_arg
-                line_names=['PyTorch', 'Triton'],  # Label name for different lines
-                styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='GB/s',  # Label name for y-axis
-                xlabel="Total elements per output tensor", # Label name for x-axis
-                plot_name=f'mul_{mode}_broadcasting={broadcasting}',  # Name for plot
-                args={"mode": mode, "broadcasting": broadcasting,},
-            ))
-@triton.testing.perf_report(mul_configs)
-def benchmark_mul(tot_elements, provider, mode, broadcasting, device=DEVICE):
-    # Generate input data
-    dim = int(tot_elements ** 0.5)
-    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
-    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
-    
-    # Select implementation
-    fn = lambda: hadamard_fn(A, B, "mul") if provider == 'triton' else A * B
-    if mode == "bwd":
-        O = fn()
-        dO = torch.randn_like(O)
-        fn = lambda: O.backward(dO, retain_graph=True)
-    
-    # Benchmark
-    ms = triton.testing.do_bench(fn)
-    return BATCH * 6 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
-
-div_configs = []
-for mode in ["fwd", "bwd"]:
-    for broadcasting in [True, False]:
-        div_configs.append(
-            triton.testing.Benchmark(
-                x_names=['tot_elements'],  # Argument names to vary
-                x_vals=[2**i for i in range(4, 15, 1)],  # Different input tot_elementss
-                line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
-                line_vals=['torch', 'triton'],  # Possible values for line_arg
-                line_names=['PyTorch', 'Triton'],  # Label name for different lines
-                styles=[('blue', '-'), ('red', '-')],  # Line styles
-                ylabel='GB/s',  # Label name for y-axis
-                xlabel="Total elements per output tensor", # Label name for x-axis
-                plot_name=f'div_{mode}_broadcasting={broadcasting}',  # Name for plot
-                args={"mode": mode, "broadcasting": broadcasting,},
-            ))
-@triton.testing.perf_report(div_configs)
-def benchmark_div(tot_elements, provider, mode, broadcasting, device=DEVICE):
-    # Generate input data
-    dim = int(tot_elements ** 0.5)
-    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
-    B = torch.randn((dim, ) if broadcasting else (BATCH, dim, dim), device=device, requires_grad=True)
-    
-    # Select implementation
-    fn = lambda: hadamard_fn(A, B, "div") if provider == 'triton' else A / B
-    if mode == "bwd":
-        O = fn()
-        dO = torch.randn_like(O)
-        fn = lambda: O.backward(dO, retain_graph=True)
-    
-    # Benchmark
-    ms = triton.testing.do_bench(fn)
-    return BATCH * 6 * tot_elements * 4 * 1e-9 / (ms * 1e-3)
 
 ########################################################################################
 ########################### Matrix Multiplication ############################################
@@ -393,21 +308,13 @@ if __name__ == "__main__":
     print(f"ATTENTION:\nBENCHMARK tot_elementsS ARE DESIGNED TO FUNCTION WITHIN A LIMIT OF 16GB of VRAM.\n"
             f"IF YOU HAVE LESS YOU WILL GET ERRORS.\nTO FIX, EDIT x_vals IN EACH BENCHMARK'S CONFIG.")
     
-    if args.all or args.add:
-        print("\nRunning addition benchmarks...")
-        benchmark_add.run(print_data=True, save_path='./benchmarks/')
-
-    if args.all or args.sub:
-        print("\nRunning subtraction benchmarks...")
-        benchmark_sub.run(print_data=True, save_path='./benchmarks/')
-
-    if args.all or args.mul:
-        print("\nRunning multiplication benchmarks...")
-        benchmark_mul.run(print_data=True, save_path='./benchmarks/')
-
-    if args.all or args.div:
-        print("\nRunning division benchmarks...")
-        benchmark_div.run(print_data=True, save_path='./benchmarks/')
+    # Generate hadamard configs based on selected operations
+    ops = get_hadamard_ops(args)
+    if ops:
+        print("\nRunning hadamard benchmarks...")
+        # Populate the hadamard_configs list
+        hadamard_configs.extend(generate_hadamard_configs(ops))
+        benchmark_hadamard.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.matmul:
         print("\nRunning matmul benchmarks...")
