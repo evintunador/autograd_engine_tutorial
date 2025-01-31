@@ -148,7 +148,6 @@ def matmul_bwd_dA(
     dC @ B^T = dA                           (M, N) @ (N, K) -> (M, K)
     A^T @ dC = dB                           (K, M) @ (M, N) -> (K, N)
     in this kernel we'll compute dA
-    # TODO hmmm how is broadcasting gradient accumulation gonna work?
     """
     # parallelizing across preceeding dimensions
     pid_preceeding_dims = tl.program_id(axis=1)
@@ -231,7 +230,6 @@ def matmul_bwd_dB(
     dC @ B^T = dA                           (M, N) @ (N, K) -> (M, K)
     A^T @ dC = dB                           (K, M) @ (M, N) -> (K, N)
     in this kernel we'll compute dB
-    # TODO hmmm how is broadcasting gradient accumulation gonna work?
     """
     # parallelizing across preceeding dimensions
     pid_preceeding_dims = tl.program_id(axis=1)
@@ -289,4 +287,3 @@ def matmul_bwd_dB(
     db_mask = (offsets_k.expand_dims(1) < K) & (offsets_n.expand_dims(0) < N)
     # atomic add instead of store in order to account for broadcasting
     tl.atomic_add(db_ptrs, accumulator, mask=db_mask)
-
