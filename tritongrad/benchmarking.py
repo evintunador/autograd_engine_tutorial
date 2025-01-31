@@ -7,13 +7,13 @@ import triton
 import triton.language as tl
 
 from engine import TritonTensor
-from kernels import hadamard, matmul
+from kernels import hadamard, matmul, unary_ops
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 BATCH = 32
 
 ########################################################################################
-########################### Elementwise Binary Operations ##############################
+########################### Binary Operations ##############################
 ########################################################################################
 
 class _hadamard(torch.autograd.Function):
@@ -287,6 +287,124 @@ def benchmark_matmul(M, N, K, provider, mode, broadcasting, device=DEVICE):
     # ms * 1e-3 converts milliseconds to seconds
     return perf 
 
+
+########################################################################################
+########################### Unary Ops ############################################
+########################################################################################
+
+
+class _unary_op(torch.autograd.Function):
+    """a simple unary operation """
+
+    @staticmethod
+    def forward(ctx, a, op_name): 
+        assert a.is_contiguous() 
+        n_elements = a.numel()
+
+        # Preallocating the output
+        b = torch.empty_like(a)
+
+        # Define grid based on tensor dimensions
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        # Launch kernel
+        unary_ops.unary_op_forward[grid](
+            a, b,
+            n_elements,
+            op_name, # designates which operation to run (exp, log, relu, etc)
+        )
+
+        ctx.save_for_backward(a, b)
+        ctx.grid = grid
+        ctx.n_elements = n_elements
+        ctx.op_name = op_name
+        return b
+
+    @staticmethod
+    def backward(ctx, db):
+        a, b = ctx.saved_tensors
+        da = torch.empty_like(a)
+        # reusing the same grid from earlier
+        unary_ops.unary_op_backward[ctx.grid](
+            a, da, 
+            b, db, 
+            ctx.n_elements,
+            ctx.op_name, 
+        )
+        return da, None
+
+unary_op_fn = _unary_op.apply
+
+# Define the operations list based on input args
+def get_unary_ops(args):
+    ops = []
+    if args.all or args.exp:
+        ops.append("exp")
+    if args.all or args.log:
+        ops.append("log")
+    return ops
+
+# First define an empty list that will be populated before the decorator is used
+unary_op_configs = []
+def generate_unary_op_configs(ops):
+    configs = []
+    for op in ops:
+        for mode in ["fwd", "bwd"]:
+            configs.append(
+                triton.testing.Benchmark(
+                    x_names=['tot_elements'],
+                    x_vals=[2**i for i in range(12, 24, 1)],
+                    line_arg='provider',
+                    line_vals=['torch', 'triton'],
+                    line_names=['PyTorch', 'Triton'],
+                    styles=[('blue', '-'), ('red', '-')],
+                    ylabel='GB/s',
+                    xlabel="Total elements per output tensor",
+                    plot_name=f'{op}_{mode}',
+                    args={"op": op, "mode": mode,},
+                ))
+    return configs
+
+@triton.testing.perf_report(unary_op_configs)
+def benchmark_unary(tot_elements, provider, op, mode, device=DEVICE):
+    """
+    Benchmark Triton unary operations against PyTorch.
+    
+    Args:
+        tot_elements: Total number of elements in the input tensor
+        provider: 'torch' or 'triton'
+        op: "exp", "log", "relu", etc; designates the operation to be performed
+        mode: "fwd" or "bwd"
+        device: Device to run on
+    """
+    # Generate input data
+    dim = int(tot_elements ** 0.5)
+    A = torch.randn((BATCH, dim, dim), device=device, requires_grad=True)
+    
+    # Select implementation
+    if op == "exp":
+        fn = lambda: unary_op_fn(A, op) if provider == 'triton' else torch.exp(A)
+    if op == "log":
+        fn = lambda: unary_op_fn(A, op) if provider == 'triton' else torch.log(A)
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO, retain_graph=True)
+    
+    # Benchmark
+    # for entry-wise operations we'll measure memory throughput since that's the limiting factor
+    if mode == "fwd": # all fwd passes have same mem read/write behavior
+        gb = BATCH * 2 * tot_elements * 4 * 1e-9
+        # 2 = number of memory operations (1 reads + 1 write)
+        # 4) = bytes per element (for float32)
+        # 1e-9 converts bytes to GB
+    else: # bwd pass 
+        gb = BATCH * 3 * tot_elements * 4 * 1e-9
+    # 1e-3 converts milliseconds to seconds
+    ms = triton.testing.do_bench(fn)
+    return gb / (ms * 1e-3)
+
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -297,6 +415,8 @@ if __name__ == "__main__":
     parser.add_argument('--mul', action='store_true', help='Run multiplication benchmarks')
     parser.add_argument('--div', action='store_true', help='Run division benchmarks')
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication benchmarks')
+    parser.add_argument('--exp', action='store_true', help='Run exponentiation benchmarks')
+    parser.add_argument('--log', action='store_true', help='Run natural logarithm benchmarks')
     
     args = parser.parse_args()
     
@@ -309,13 +429,19 @@ if __name__ == "__main__":
             f"IF YOU HAVE LESS YOU WILL GET ERRORS.\nTO FIX, EDIT x_vals IN EACH BENCHMARK'S CONFIG.")
     
     # Generate hadamard configs based on selected operations
-    ops = get_hadamard_ops(args)
-    if ops:
+    binary_ops_args = get_hadamard_ops(args)
+    if binary_ops_args:
         print("\nRunning hadamard benchmarks...")
         # Populate the hadamard_configs list
-        hadamard_configs.extend(generate_hadamard_configs(ops))
+        hadamard_configs.extend(generate_hadamard_configs(binary_ops_args))
         benchmark_hadamard.run(print_data=True, save_path='./benchmarks/')
 
     if args.all or args.matmul:
         print("\nRunning matmul benchmarks...")
         benchmark_matmul.run(print_data=True, save_path='./benchmarks/')
+
+    unary_ops_args = get_unary_ops(args)
+    if unary_ops_args:
+        print("\nRunning unary operation benchmarks...")
+        unary_op_configs.extend(generate_unary_op_configs(unary_ops_args))
+        benchmark_unary.run(print_data=True, save_path='./benchmarks/')

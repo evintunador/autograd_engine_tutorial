@@ -16,7 +16,6 @@ DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 @triton.jit
 def unary_op_forward(
     x_ptr,                      # pointer to input tensor
-    y,                          # optional input float
     z_ptr,                      # pointer to desired output tensor
     n_elements,                 # number of elements in input & output tensors
     op: tl.constexpr,
@@ -27,16 +26,6 @@ def unary_op_forward(
     mask = offsets < n_elements
     x = tl.load(x_ptr + offsets, mask=mask)
 
-    """
-    if op == "add":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    if op == "sub":
-        tl.store(z_ptr + offsets, x - y, mask=mask)
-    if op == "div":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    if op == "mul":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    """
     if op == "exp":
         tl.store(z_ptr + offsets, tl.exp(x), mask=mask)
     if op == "log":
@@ -67,16 +56,6 @@ def unary_op_backward(
     mask = offsets < n_elements
     dz = tl.load(dz_ptr + offsets, mask=mask)
 
-    """
-    if op == "add":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    if op == "sub":
-        tl.store(z_ptr + offsets, x - y, mask=mask)
-    if op == "div":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    if op == "mul":
-        tl.store(z_ptr + offsets, x + y, mask=mask)
-    """
     if op == "exp":
         z = tl.load(z_ptr + offsets, mask=mask)
         tl.store(dx_ptr + offsets, z * dz, mask=mask)

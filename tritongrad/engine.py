@@ -255,7 +255,6 @@ class TritonTensor:
         # Launch kernel
         unary_ops.unary_op_forward[grid](
             self.data, 
-            None,
             output, 
             n_elements,
             "exp", 
@@ -294,7 +293,6 @@ class TritonTensor:
         # Launch kernel
         unary_ops.unary_op_forward[grid](
             self.data, 
-            None,
             output, 
             n_elements,
             "log", 
