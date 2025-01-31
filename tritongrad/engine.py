@@ -15,7 +15,7 @@ from math import prod
 import torch
 import triton
 import triton.language as tl
-from kernels import hadamard, matmul
+from kernels import hadamard, matmul, unary_ops
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
@@ -61,7 +61,7 @@ class TritonTensor:
         self._backward = lambda: None  # function to compute local gradient updates
 
     def __repr__(self):
-        return f"Tensor:\n{self.data}\nGrad:{self.grad}"
+        return f"TritonTensor:\n{self.data}"#\nGrad:{self.grad}"
     
     def _hadamard(self, other, op):
         """a simple hadamard (entry-wise) operation that supports broadcasting of `other` up to size `self`"""
@@ -244,14 +244,82 @@ class TritonTensor:
         raise NotImplementedError("Mean reduction kernel not yet implemented")
 
     def exp(self):
-        """Placeholder for exponential operation"""
-        # TODO: Implement Triton kernel for exponential
-        raise NotImplementedError("Exponential kernel not yet implemented")
+        assert self.data.is_contiguous(), "matrix A must be contiguous"
+
+        # Preallocating the output
+        output = torch.empty_like(self.data)
+
+        # Define grid based on tensor dimensions
+        n_elements = self.data.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        # Launch kernel
+        unary_ops.unary_op_forward[grid](
+            self.data, 
+            None,
+            output, 
+            n_elements,
+            "exp", 
+        )
+        
+        # Wrap output in TritonTensor with autograd information
+        out = TritonTensor(
+            output,
+            requires_grad = self.requires_grad,
+            _children = (self,)
+        )
+
+        # define our backward pass
+        def _backward():
+            if self.requires_grad:
+                # reuse same grid from fwd pass
+                unary_ops.unary_op_backward[grid](
+                    self.data, self.grad,
+                    out.data, out.grad,
+                    n_elements,
+                    "exp",
+                )
+        out._backward = _backward
+
+        return out
 
     def log(self):
-        """Placeholder for logarithm operation"""
-        # TODO: Implement Triton kernel for logarithm
-        raise NotImplementedError("Logarithm kernel not yet implemented")
+        assert self.data.is_contiguous(), "matrix A must be contiguous"
+
+        # Preallocating the output
+        output = torch.empty_like(self.data)
+
+        # Define grid based on tensor dimensions
+        n_elements = self.data.numel()
+        grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        # Launch kernel
+        unary_ops.unary_op_forward[grid](
+            self.data, 
+            None,
+            output, 
+            n_elements,
+            "log", 
+        )
+        
+        # Wrap output in TritonTensor with autograd information
+        out = TritonTensor(
+            output,
+            requires_grad = self.requires_grad,
+            _children = (self,)
+        )
+
+        # define our backward pass
+        def _backward():
+            if self.requires_grad:
+                # reuse same grid from fwd pass
+                unary_ops.unary_op_backward[grid](
+                    self.data, self.grad,
+                    out.data, out.grad,
+                    n_elements,
+                    "log",
+                )
+        out._backward = _backward
+
+        return out
 
     def relu(self):
         """Placeholder for ReLU activation"""
