@@ -20,7 +20,7 @@ autotune_configs = [
 def matmul_fwd(
     a_ptr, b_ptr, c_ptr, # pointers to first entries of matrices
     M, N, K, # matrix dimensions
-    stride_a_preceeding_dims, stride_a_m, stride_a_k, # tuple of how much to increase the ptr by when moving by 1 element along that dimension
+    stride_a_preceeding_dims, stride_a_m, stride_a_k, # how much to increase the ptr by when moving by 1 element along that dimension
     stride_b_preceeding_dims, stride_b_k, stride_b_n, 
     stride_c_preceeding_dims, stride_c_m, stride_c_n,
     # meta-parameters
@@ -287,5 +287,6 @@ def matmul_bwd_dB(
     # write back the block of the output matrix dB with masks
     db_ptrs = db_ptr + offsets_k.expand_dims(1) * stride_db_k + offsets_n.expand_dims(0) * stride_db_n
     db_mask = (offsets_k.expand_dims(1) < K) & (offsets_n.expand_dims(0) < N)
-    tl.store(db_ptrs, accumulator, mask=db_mask)
+    # atomic add instead of store in order to account for broadcasting
+    tl.atomic_add(db_ptrs, accumulator, mask=db_mask)
 
