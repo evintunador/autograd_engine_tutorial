@@ -57,8 +57,8 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        #print(torch_input.grad, torch_input.shape)
-        #print(triton_input.grad, triton_input.shape)
+        print(torch_input.grad, torch_input.shape)
+        print(triton_input.grad, triton_input.shape)
         torch.testing.assert_close(triton_input.grad, torch_input.grad, atol=atol, rtol=rtol)
     print(f"✓ Backward pass matches")
     
@@ -77,6 +77,7 @@ if __name__ == "__main__":
     parser.add_argument('--mul', action='store_true', help='Run multiplication tests')
     parser.add_argument('--div', action='store_true', help='Run division tests')
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication tests')
+    parser.add_argument('--sum', action='store_true', help='Run summation across final dimension tests')
     
     args = parser.parse_args()
     
@@ -263,5 +264,19 @@ if __name__ == "__main__":
             inputs_list([(B, N, D), (D, N)]),
             atol=5e-2,
             rtol=1e5,
+        )
+        
+    ### SUMMATION
+    if args.all or args.sum:
+        def triton_sum(x): return x.sum()
+        def torch_sum(x): return torch.sum(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"summation: ({B}, {N}, {D})",
+            triton_sum,
+            torch_sum,
+            inputs_list([(B, N, D)]),
         )
         

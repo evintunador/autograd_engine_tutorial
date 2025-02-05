@@ -15,9 +15,12 @@ from math import prod
 import torch
 import triton
 import triton.language as tl
-from kernels import elementwise, matmul
+from kernels import elementwise, matmul, reduction_ops
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
+properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
+TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # each SM has a fixed amount of SRAM that it can access
+    # if one SM isn't using all its available SRAM then another can be spun up to use the remainder
 
 class TritonTensor:
     '''
@@ -233,16 +236,6 @@ class TritonTensor:
 
         return out
 
-    def sum(self, dim=None, keepdim=False):
-        """Placeholder for sum reduction"""
-        # TODO: Implement Triton kernel for sum reduction
-        raise NotImplementedError("Sum reduction kernel not yet implemented")
-
-    def mean(self, dim=None, keepdim=False):
-        """Placeholder for mean reduction"""
-        # TODO: Implement Triton kernel for mean reduction
-        raise NotImplementedError("Mean reduction kernel not yet implemented")
-
     def _unary(self, op):
         assert self.data.is_contiguous(), "matrix A must be contiguous"
 
@@ -290,30 +283,72 @@ class TritonTensor:
     def relu(self):
         return self._unary(op='relu')
 
+    def _reduction(self, op):
+        """
+        all reduction ops (sum, min, max, etc) move through here
+        it's a relatively inflexible module; we only support reduction along the tensor's final dimension
+        """
+        assert self.data.is_contiguous(), "matrix A must be contiguous"
+
+        # Preallocating the output
+        output = torch.empty(self.data.shape[:-1], dtype=self.dtype, device=self.device, requires_grad=False)
+
+        # get tensor dimensions to ensure our parallelization scheme will work
+        n_cols = self.shape[-1]
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        # 4 for the 4 bytes in fp32
+        assert BLOCK_SIZE_N * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_N * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        # we'll parallelize with multiple rows in a PID
+        grid = lambda meta: (triton.cdiv(self.data.numel() // n_cols, meta['BLOCK_SIZE_M']), )
+        # Launch kernel
+        reduction_ops.reduction_op_forward[grid](
+            self.data, output, 
+            self.data.numel(), output.numel(), 
+            self.data.stride()[-2], n_cols, 
+            op, 
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+        
+        # Wrap output in TritonTensor with autograd information
+        out = TritonTensor(
+            output,
+            requires_grad = self.requires_grad,
+            _children = (self,)
+        )
+
+        # define our backward pass
+        def _backward():
+            pass
+            if self.requires_grad:
+                pass
+        out._backward = _backward
+
+        return out
+
+    def sum(self, dim=None, keepdim=False):
+        return self._reduction(op='sum')
+
+    def mean(self, dim=None, keepdim=False):
+        return self._reduction(op='mean')
+
     def max(self, dim=None):
-        """Placeholder for max reduction"""
-        # TODO: Implement Triton kernel for max reduction
-        raise NotImplementedError("Max reduction kernel not yet implemented")
+        return self._reduction(op='max')
 
     def min(self, dim=None):
-        """Placeholder for min reduction"""
-        # TODO: Implement Triton kernel for min reduction
-        raise NotImplementedError("Min reduction kernel not yet implemented")
+        return self._reduction(op='min')
+
+    def var(self, dim=-1, keepdim=False):
+        return self._reduction(op='var')
+
+    def sd(self, dim=-1, keepdim=False):
+        return self._reduction(op='sd')
 
     def softmax(self, dim=-1):
         """Placeholder for softmax operation"""
         # TODO: Implement Triton kernel for softmax
         raise NotImplementedError("Softmax kernel not yet implemented")
-
-    def var(self, dim=-1, keepdim=False):
-        """Placeholder for variance reduction"""
-        # TODO: Implement Triton kernel for variance
-        raise NotImplementedError("Variance kernel not yet implemented")
-
-    def sd(self, dim=-1, keepdim=False):
-        """Placeholder for standard deviation reduction"""
-        # TODO: Implement Triton kernel for standard deviation
-        raise NotImplementedError("Standard deviation kernel not yet implemented")
 
     def transpose(self, axes=None):
         """Placeholder for transpose operation"""
@@ -372,6 +407,9 @@ class TritonTensor:
             node._backward()
 
     def zero_grad_backward(self):
+        """
+        a faster way to ensure all your gradients are set to zero
+        """
         self.grad = torch.zeros_like(self.grad) if self.grad is not None else None
         topo = []
         visited = set()
