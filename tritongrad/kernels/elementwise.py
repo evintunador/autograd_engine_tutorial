@@ -66,8 +66,7 @@ def unary_op_backward(
         tl.store(dx_ptr + offsets, dz / x, mask=mask)
     if op == "relu":
         z = tl.load(z_ptr + offsets, mask=mask)
-        # i think this is an incorrect 
-        tl.store(z_ptr + offsets, (z > 0.0) * dz , mask=mask)
+        tl.store(dx_ptr + offsets, (z > 0.0) * dz , mask=mask)
 
 
 
