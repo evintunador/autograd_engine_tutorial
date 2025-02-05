@@ -305,11 +305,6 @@ class TritonTensor:
         # TODO: Implement Triton kernel for softmax
         raise NotImplementedError("Softmax kernel not yet implemented")
 
-    def __pow__(self, power):
-        """Placeholder for power operation"""
-        # TODO: Implement Triton kernel for power
-        raise NotImplementedError("Power kernel not yet implemented")
-
     def var(self, dim=-1, keepdim=False):
         """Placeholder for variance reduction"""
         # TODO: Implement Triton kernel for variance
