@@ -66,7 +66,7 @@ def get_unary_ops_args(args):
         ops.append("exp")
     if args.all or args.log:
         ops.append("log")
-    if args.all or args.log:
+    if args.all or args.relu:
         ops.append("relu")
     return ops
 
