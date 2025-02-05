@@ -148,6 +148,12 @@ if __name__ == "__main__":
             torch_add,
             inputs_list([(B, N, D), (D)]),
         )
+        test_operation(
+            f"addition with single scalar: ({B}, {N}, {D}) + (1)",
+            triton_add,
+            torch_add,
+            inputs_list([(B, N, D), (1)]),
+        )
 
     ### MULTIPLICATION
     if args.all or args.mul:
@@ -167,6 +173,12 @@ if __name__ == "__main__":
             triton_mul,
             torch_mul,
             inputs_list([(B, N, D), (D)]),
+        )
+        test_operation(
+            f"multiplication with single scalar: ({B}, {N}, {D}) * (1)",
+            triton_mul,
+            torch_mul,
+            inputs_list([(B, N, D), (1)]),
         )
 
     ### SUBTRACTION
@@ -188,6 +200,12 @@ if __name__ == "__main__":
             torch_sub,
             inputs_list([(B, N, D), (D)]),
         )
+        test_operation(
+            f"subtraction with single scalar: ({B}, {N}, {D}) + (1)",
+            triton_sub,
+            torch_sub,
+            inputs_list([(B, N, D), (1)]),
+        )
 
     ### DIVISION
     if args.all or args.div:
@@ -207,6 +225,12 @@ if __name__ == "__main__":
             triton_div,
             torch_div,
             inputs_list([(B, N, D), (D)]),
+        )
+        test_operation(
+            f"division with single scalar: ({B}, {N}, {D}) + (1)",
+            triton_div,
+            torch_div,
+            inputs_list([(B, N, D), (1)]),
         )
 
     ### MATMUL

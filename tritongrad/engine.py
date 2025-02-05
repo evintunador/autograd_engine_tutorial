@@ -83,7 +83,7 @@ class TritonTensor:
 
         # restricting the possible set of inputs to those which are logically broadcastable.
         # if we didn't do this then later our kernel would compute nonsensical broadcasting values
-        if self.shape != other.shape:
+        if self.shape != other.shape and other.shape != (1,): # the latter case is for when other is a single scalar
             ptr = 0
             for d in self.shape:
                 if ptr == other.ndim: break
