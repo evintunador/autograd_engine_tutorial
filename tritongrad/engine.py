@@ -320,9 +320,14 @@ class TritonTensor:
 
         # define our backward pass
         def _backward():
-            pass
             if self.requires_grad:
-                pass
+                reduction_ops.reduction_op_backward[grid](
+                    self.grad, out.grad,
+                    self.grad.numel(), out.grad.numel(),
+                    self.data.stride()[-2], n_cols, 
+                    op, 
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                )
         out._backward = _backward
 
         return out
