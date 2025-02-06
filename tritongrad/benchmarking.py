@@ -7,9 +7,13 @@ import triton
 import triton.language as tl
 
 from engine import TritonTensor
-from kernels import elementwise, matmul
+from kernels import elementwise, matmul, reduction_ops
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
+properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
+TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # each SM has a fixed amount of SRAM that it can access
+    # if one SM isn't using all its available SRAM then another can be spun up to use the remainder
+
 BATCH = 32
 
 
@@ -415,6 +419,131 @@ def benchmark_matmul(M, N, K, provider, mode, broadcasting, device=DEVICE):
     return perf 
 
 
+########################################################################################
+########################### Reduction Operations ############################################
+########################################################################################
+
+class _reduction(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x, op_name): 
+        """
+        implementation of reduction ops
+        only supports reduction along the final dimension
+        """
+        # check constraints
+        assert x.data.is_contiguous()
+
+        # allocates output
+        y = torch.empty(x.shape[:-1], device=x.device, dtype=x.dtype)
+
+        # get tensor dimensions to ensure our parallelization scheme will work
+        n_cols = x.shape[-1]
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        # 4 for the 4 bytes in fp32
+        assert BLOCK_SIZE_N * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_N * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        # we'll parallelize with multiple rows in a PID
+        grid = lambda meta: (triton.cdiv(x.numel() // n_cols, meta['BLOCK_SIZE_M']), )
+        # Launch kernel
+        reduction_ops.reduction_op_forward[grid](
+            x, y, 
+            x.numel(), y.numel(), 
+            x.stride()[-2], n_cols, 
+            op = op_name, 
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+
+        ctx.op_name = op_name
+        ctx.BLOCK_SIZE_N = BLOCK_SIZE_N
+        ctx.n_cols = n_cols
+        ctx.grid = grid
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        #a, b = ctx.saved_tensors
+        dx = torch.empty(dy.shape + (ctx.n_cols,), device=dy.device, dtype=dy.dtype)
+        grid = ctx.grid
+        
+        reduction_ops.reduction_op_backward[grid](
+            dx, dy,
+            dx.numel(), dy.numel(),
+            dx.stride()[-2], ctx.n_cols, 
+            op = ctx.op_name, 
+            BLOCK_SIZE_N = ctx.BLOCK_SIZE_N,
+        )
+
+        return dx, None
+
+reduction_fn = _reduction.apply
+
+# Define the operations list based on input args
+def get_reduction_args(args):
+    ops = []
+    if args.all or args.sum:
+        ops.append("sum")
+    return ops
+
+# First define an empty list that will be populated before the decorator is used
+reduction_configs = []
+def generate_reduction_configs(ops):
+    configs = []
+    for op in ops:
+        for mode in ["fwd", "bwd"]:
+            configs.append(
+                triton.testing.Benchmark(
+                    x_names=['tot_elements'],
+                    x_vals=[2**i for i in range(12, 24, 1)],
+                    line_arg='provider',
+                    line_vals=['torch', 'triton'],
+                    line_names=['PyTorch', 'Triton'],
+                    styles=[('blue', '-'), ('red', '-')],
+                    ylabel='GB/s',
+                    xlabel="Total elements per output tensor",
+                    plot_name=f'{op}_{mode}',
+                    args={"op": op, "mode": mode,},
+                ))
+    return configs
+
+@triton.testing.perf_report(reduction_configs)
+def benchmark_reduction(tot_elements, provider, op, mode, device=DEVICE):
+    """
+    Benchmark Triton reduction operations against PyTorch.
+    
+    Args:
+        tot_elements: Total number of elements in the tensors
+        provider: 'torch' or 'triton'
+        op: "sum", "mean", "max", etc; designates the operation to be performed
+        mode: "fwd" or "bwd"
+        device: Device to run on
+    """
+    # Generate input data
+    dim = int(tot_elements ** 0.5)
+    X = torch.randn((dim, dim), device=device, requires_grad=True)
+    
+    # Select implementation
+    if op == "sum":
+        fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.sum(X, dim=1)
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO, retain_graph=True)
+    
+    # Benchmark
+    # for entry-wise operations we'll measure memory throughput since that's the limiting factor
+    if mode == "fwd": # all fwd passes have same mem read/write behavior
+        gb = 2 * tot_elements * 4 * 1e-9
+        # 2 = number of memory operations (1 read + 1 write)
+        # 4) = bytes per element (for float32)
+        # 1e-9 converts bytes to GB
+    else: # bwd pass of sum
+        gb = 2 * tot_elements * 4 * 1e-9
+    # 1e-3 converts milliseconds to seconds
+    ms = triton.testing.do_bench(fn)
+    return gb / (ms * 1e-3)
+
 
 if __name__ == "__main__":
     import argparse
@@ -429,6 +558,7 @@ if __name__ == "__main__":
     parser.add_argument('--mul', action='store_true', help='Run multiplication benchmarks')
     parser.add_argument('--div', action='store_true', help='Run division benchmarks')
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication benchmarks')
+    parser.add_argument('--sum', action='store_true', help='Run summation benchmarks')
     
     args = parser.parse_args()
     
@@ -456,3 +586,9 @@ if __name__ == "__main__":
     if args.all or args.matmul:
         print("\nRunning matmul benchmarks...")
         benchmark_matmul.run(print_data=True, save_path='./benchmarks/')
+    
+    reduction_args = get_reduction_args(args)
+    if reduction_args:
+        print("\nRunning reduction operation benchmarks...")
+        reduction_configs.extend(generate_reduction_configs(reduction_args))
+        benchmark_reduction.run(print_data=True, save_path='./benchmarks/')

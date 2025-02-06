@@ -22,9 +22,9 @@ this should make our kernels far less flexible but also far more efficient
 @triton.jit
 def reduction_op_forward(
     x_ptr,
-    z_ptr,
+    y_ptr,
     x_num_elements,
-    z_num_elements,
+    y_num_elements,
     stride_row,                     # number of places to move forward in memory to get to same entry of next row
     row_len: tl.constexpr,          # row length; used in determining BLOCK_SIZE_N
     op: tl.constexpr,
@@ -43,11 +43,11 @@ def reduction_op_forward(
     x_block = tl.load(x_ptr + x_offsets, mask=mask)
     
     # Perform reduction
-    z = tl.sum(x_block, axis=1)
+    y = tl.sum(x_block, axis=1)
     
     # Store result
-    store_mask = row_idx < z_num_elements
-    tl.store(z_ptr + row_idx, z, mask=store_mask)
+    store_mask = row_idx < y_num_elements
+    tl.store(y_ptr + row_idx, y, mask=store_mask)
 
 
 @triton.autotune( 
@@ -62,9 +62,9 @@ def reduction_op_forward(
 @triton.jit
 def reduction_op_backward(
     dx_ptr,
-    dz_ptr,
+    dy_ptr,
     dx_num_elements,
-    dz_num_elements,
+    dy_num_elements,
     stride_row,                     # number of places to move forward in memory to get to same entry of next row
     row_len: tl.constexpr,          # row length; used in determining BLOCK_SIZE_N
     op: tl.constexpr,
@@ -75,11 +75,11 @@ def reduction_op_backward(
     row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     
     # Load data
-    mask = row_idx < dz_num_elements 
-    dz_block = tl.load(dz_ptr + row_idx, mask=mask)
+    mask = row_idx < dy_num_elements 
+    dy_block = tl.load(dy_ptr + row_idx, mask=mask)
     
     # Perform broadcasting up to input shape
-    dx_block = tl.broadcast_to(dz_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+    dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
     
     # Store result
     col_idx = tl.arange(0, BLOCK_SIZE_N)
