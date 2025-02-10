@@ -484,6 +484,8 @@ def get_reduction_args(args):
     ops = []
     if args.all or args.sum:
         ops.append("sum")
+    if args.all or args.mean:
+        ops.append("mean")
     return ops
 
 # First define an empty list that will be populated before the decorator is used
@@ -526,6 +528,8 @@ def benchmark_reduction(tot_elements, provider, op, mode, device=DEVICE):
     # Select implementation
     if op == "sum":
         fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.sum(X, dim=1)
+    elif op == "mean":
+        fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.mean(X, dim=1)
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -559,6 +563,7 @@ if __name__ == "__main__":
     parser.add_argument('--div', action='store_true', help='Run division benchmarks')
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication benchmarks')
     parser.add_argument('--sum', action='store_true', help='Run summation benchmarks')
+    parser.add_argument('--mean', action='store_true', help='Run mean benchmarks')
     
     args = parser.parse_args()
     
