@@ -82,6 +82,8 @@ if __name__ == "__main__":
     parser.add_argument('--mean', action='store_true', help='Run mean across final dimension tests')
     parser.add_argument('--max', action='store_true', help='Run max across final dimension tests')
     parser.add_argument('--min', action='store_true', help='Run min across final dimension tests')
+    parser.add_argument('--var', action='store_true', help='Run variance across final dimension tests')
+    parser.add_argument('--std', action='store_true', help='Run standard deviation across final dimension tests')
     
     args = parser.parse_args()
     
@@ -323,6 +325,34 @@ if __name__ == "__main__":
             f"minimum: ({B}, {N}, {D})",
             triton_min,
             torch_min,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### VARIANCE
+    if args.all or args.var:
+        def triton_var(x): return x.var()
+        def torch_var(x): return torch.var(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"variance: ({B}, {N}, {D})",
+            triton_var,
+            torch_var,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### STANDARD DEVIATION
+    if args.all or args.std:
+        def triton_std(x): return x.std()
+        def torch_std(x): return torch.std(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"standard deviation: ({B}, {N}, {D})",
+            triton_std,
+            torch_std,
             inputs_list([(B, N, D)]),
         )
         

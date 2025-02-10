@@ -51,6 +51,13 @@ def reduction_op_forward(
         y = tl.max(x_block, axis=1)
     if op == "min":
         y = tl.min(x_block, axis=1)
+    if op == "var":
+        err = x_block - tl.sum(x_block, axis=1, keep_dims=True)
+        y = tl.sum(err * err, axis=1) / row_len
+    if op == "std":
+        err = x_block - tl.sum(x_block, axis=1, keep_dims=True)
+        y = tl.sum(err * err, axis=1) / row_len
+        y = tl.sqrt(y)
 
     # Store result
     store_mask = row_idx < y_num_elements

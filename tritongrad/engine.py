@@ -347,8 +347,8 @@ class TritonTensor:
     def var(self, dim=-1, keepdim=False):
         return self._reduction(op='var')
 
-    def sd(self, dim=-1, keepdim=False):
-        return self._reduction(op='sd')
+    def std(self, dim=-1, keepdim=False):
+        return self._reduction(op='std')
 
     def softmax(self, dim=-1):
         """Placeholder for softmax operation"""
