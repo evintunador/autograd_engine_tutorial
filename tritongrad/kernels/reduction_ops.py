@@ -43,7 +43,10 @@ def reduction_op_forward(
     x_block = tl.load(x_ptr + x_offsets, mask=mask)
     
     # Perform reduction
-    y = tl.sum(x_block, axis=1)
+    if op == "sum":
+        y = tl.sum(x_block, axis=1)
+    if op == "mean":
+        y = tl.sum(x_block, axis=1) / row_len
     
     # Store result
     store_mask = row_idx < y_num_elements
@@ -78,8 +81,11 @@ def reduction_op_backward(
     mask = row_idx < dy_num_elements 
     dy_block = tl.load(dy_ptr + row_idx, mask=mask)
     
-    # Perform broadcasting up to input shape
-    dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+    # Perform broadcasting up to input shape & any other gradient calcs
+    if op == "sum":
+        dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+    if op == "mean":
+        dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
     
     # Store result
     col_idx = tl.arange(0, BLOCK_SIZE_N)

@@ -78,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('--div', action='store_true', help='Run division tests')
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication tests')
     parser.add_argument('--sum', action='store_true', help='Run summation across final dimension tests')
+    parser.add_argument('--mean', action='store_true', help='Run mean across final dimension tests')
     
     args = parser.parse_args()
     
@@ -277,6 +278,20 @@ if __name__ == "__main__":
             f"summation: ({B}, {N}, {D})",
             triton_sum,
             torch_sum,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### MEAN
+    if args.all or args.mean:
+        def triton_mean(x): return x.mean()
+        def torch_mean(x): return torch.mean(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"mean: ({B}, {N}, {D})",
+            triton_mean,
+            torch_mean,
             inputs_list([(B, N, D)]),
         )
         
