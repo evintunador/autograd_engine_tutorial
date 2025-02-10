@@ -36,6 +36,7 @@ def test_operation(op_name: str,
     # Forward pass
     #with torch.autocast(device_type='cuda', dtype=torch.float32):
     torch_out = torch_fn(*torch_inputs)
+    torch_out = torch_out[0] if op_name[:3] in ("min", "max") else torch_out
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
@@ -79,6 +80,8 @@ if __name__ == "__main__":
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication tests')
     parser.add_argument('--sum', action='store_true', help='Run summation across final dimension tests')
     parser.add_argument('--mean', action='store_true', help='Run mean across final dimension tests')
+    parser.add_argument('--max', action='store_true', help='Run max across final dimension tests')
+    parser.add_argument('--min', action='store_true', help='Run min across final dimension tests')
     
     args = parser.parse_args()
     
@@ -292,6 +295,34 @@ if __name__ == "__main__":
             f"mean: ({B}, {N}, {D})",
             triton_mean,
             torch_mean,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### MAXIMUM
+    if args.all or args.max:
+        def triton_max(x): return x.max()
+        def torch_max(x): return torch.max(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"maximum: ({B}, {N}, {D})",
+            triton_max,
+            torch_max,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### MINIMUM
+    if args.all or args.min:
+        def triton_min(x): return x.min()
+        def torch_min(x): return torch.min(x, dim=-1)
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        test_operation(
+            f"minimum: ({B}, {N}, {D})",
+            triton_min,
+            torch_min,
             inputs_list([(B, N, D)]),
         )
         

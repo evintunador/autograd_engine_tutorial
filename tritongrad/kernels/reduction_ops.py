@@ -47,7 +47,11 @@ def reduction_op_forward(
         y = tl.sum(x_block, axis=1)
     if op == "mean":
         y = tl.sum(x_block, axis=1) / row_len
-    
+    if op == "max":
+        y = tl.max(x_block, axis=1)
+    if op == "min":
+        y = tl.min(x_block, axis=1)
+
     # Store result
     store_mask = row_idx < y_num_elements
     tl.store(y_ptr + row_idx, y, mask=store_mask)
