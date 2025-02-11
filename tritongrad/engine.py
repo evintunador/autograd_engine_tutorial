@@ -454,4 +454,11 @@ class TritonTensor:
             node.grad = torch.zeros_like(node.grad) if node.grad is not None else None
 
 
-
+class Parameter(TritonTensor):
+    """
+    A Parameter is a special kind of Tensor that is meant to be trainable.
+    Typically used for model weights and biases in neural network layers.
+    By default, Parameters require gradients.
+    """
+    def __init__(self, data: Union[float, int, np.ndarray]):
+        super().__init__(data, requires_grad=True)
