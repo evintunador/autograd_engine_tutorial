@@ -37,6 +37,7 @@ def test_operation(op_name: str,
     #with torch.autocast(device_type='cuda', dtype=torch.float32):
     torch_out = torch_fn(*torch_inputs)
     torch_out = torch_out[0] if op_name[:3] in ("min", "max") else torch_out
+        # TODO do we need our max op to also give indices?
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
@@ -84,6 +85,8 @@ if __name__ == "__main__":
     parser.add_argument('--min', action='store_true', help='Run min across final dimension tests')
     parser.add_argument('--var', action='store_true', help='Run variance across final dimension tests')
     parser.add_argument('--std', action='store_true', help='Run standard deviation across final dimension tests')
+    parser.add_argument('--trans', action='store_true', help='Run transpose across arbitrary axes tests')
+
     
     args = parser.parse_args()
     

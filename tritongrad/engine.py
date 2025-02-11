@@ -25,8 +25,8 @@ TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # each SM has a fixed amount of
 class TritonTensor:
     '''
     Stores a tensor and its gradient information.
-    Functions as a wrapper around torch.tensor so that we can take advantage of in-built ops like __add__ 
-     and __mul__ rather than writing Triton kernels in the traditional way.
+    Functions as a wrapper around torch.tensor so that we can take advantage of in-built ops 
+    like __add__ and __mul__ rather than writing Triton kernels in the traditional way.
     '''
     def __init__(self, 
                  data: Union[float, int, list, np.ndarray, torch.Tensor], 
@@ -254,11 +254,7 @@ class TritonTensor:
         )
         
         # Wrap output in TritonTensor with autograd information
-        out = TritonTensor(
-            output,
-            requires_grad = self.requires_grad,
-            _children = (self,)
-        )
+        out = TritonTensor(output, requires_grad = self.requires_grad, _children = (self,))
 
         # define our backward pass
         def _backward():
@@ -312,11 +308,7 @@ class TritonTensor:
         )
         
         # Wrap output in TritonTensor with autograd information
-        out = TritonTensor(
-            output,
-            requires_grad = self.requires_grad,
-            _children = (self,)
-        )
+        out = TritonTensor(output, requires_grad = self.requires_grad, _children = (self,))
 
         # define our backward pass
         def _backward():
@@ -351,40 +343,68 @@ class TritonTensor:
     def std(self, dim=-1, keepdim=False):
         return self._reduction(op='std')
 
-    def softmax(self, dim=-1):
-        """Placeholder for softmax operation"""
-        # TODO: Implement Triton kernel for softmax
-        raise NotImplementedError("Softmax kernel not yet implemented")
-
     def transpose(self, axes=None):
-        """Placeholder for transpose operation"""
-        # TODO: Implement Triton kernel for transpose
-        raise NotImplementedError("Transpose kernel not yet implemented")
+        if axes is None:  # defaults to transposing final two dims
+            axes = tuple(dim for dim in range(self.ndim - 2)) + (self.ndim - 1, self.ndim - 2)
+        out = TritonTensor(self.data.permute(axes), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += out.grad.permute(axes)
+        out._backward = _backward
+        return out
 
     def squeeze(self, dim):
-        """Placeholder for squeeze operation"""
-        # TODO: Implement Triton kernel for squeeze
-        raise NotImplementedError("Squeeze kernel not yet implemented")
-
+        # i don't care enough about shape operations to do custom kernels for them
+        out = TritonTensor(torch.squeeze(self.data, axis=dim), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += torch.expand_dims(out.grad, axis=dim)
+        out._backward = _backward
+        return out
+        
     def unsqueeze(self, dim):
-        """Placeholder for unsqueeze operation"""
-        # TODO: Implement Triton kernel for unsqueeze
-        raise NotImplementedError("Unsqueeze kernel not yet implemented")
+        # i don't care enough about shape operations to do custom kernels for them
+        out = TritonTensor(torch.expand_dims(self.data, axis=dim), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += torch.squeeze(out.grad, axis=dim)
+        out._backward = _backward
+        return out
 
     def broadcast_to(self, shape):
-        """Placeholder for broadcast operation"""
-        # TODO: Implement Triton kernel for broadcast
-        raise NotImplementedError("Broadcast kernel not yet implemented")
+        if self.shape == shape:
+            return self
+        for i in range(self.ndim):
+            if self.shape[i] != shape[i]:
+                dim = i
+        assert self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[dim]}"
+        out = TritonTensor(self.data.expand(shape), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += out.grad.sum(dim=dim, keepdim=True)
+        out._backward = _backward
+        return out
 
     def reshape(self, shape):
-        """Placeholder for reshape operation"""
-        # TODO: Implement Triton kernel for reshape
-        raise NotImplementedError("Reshape kernel not yet implemented")
+        # i don't care enough about shape operations to do custom kernels for them
+        out = Tensor(np.reshape(self.data, shape), self.requires_grad, (self,))
+        def _backward():
+            if self.requires_grad:
+                self.grad += np.reshape(out.grad, self.shape)
+        out._backward = _backward
+        return out
 
     def __getitem__(self, idx):
-        """Placeholder for indexing operation"""
-        # TODO: Implement Triton kernel for indexing
-        raise NotImplementedError("Indexing kernel not yet implemented")
+        # i don't care enough about shape operations to do custom kernels for them
+        # pytorch handles the actual indexing behavior for us
+        sliced_data = self.data[idx]
+        out = TritonTensor(sliced_data, self.requires_grad, _children=(self,))
+        def _backward():
+            if self.requires_grad:
+                # Use index_add_ to accumulate gradients at the indexed positions
+                self.grad += torch.zeros_like(self.grad).index_add_(0, idx, out.grad)
+        out._backward = _backward
+        return out
 
     def masked_fill(self, mask, fill_value):
         """Placeholder for masked fill operation"""
