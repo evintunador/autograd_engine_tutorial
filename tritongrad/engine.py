@@ -410,11 +410,6 @@ class TritonTensor:
         out._backward = _backward
         return out
 
-    def masked_fill(self, mask, fill_value):
-        """Placeholder for masked fill operation"""
-        # TODO: Implement Triton kernel for masked fill
-        raise NotImplementedError("Masked fill kernel not yet implemented")
-
     def zero_grad(self):
         self.grad = torch.zeros_like(self.data) if self.requires_grad else None
 
