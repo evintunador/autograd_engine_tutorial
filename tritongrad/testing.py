@@ -9,6 +9,7 @@ import triton.language as tl
 device = torch.device(f'cuda:{torch.cuda.current_device()}')
 
 from engine import TritonTensor
+import nn
 
 def test_operation(op_name: str,
                   triton_fn,
@@ -90,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('--unsqz', action='store_true', help='Run unsqueeze across arbitrary axes tests')
     parser.add_argument('--reshape', action='store_true', help='Run reshape tests')
     parser.add_argument('--idx', action='store_true', help='Run indexing tests')
+    parser.add_argument('--linear', action='store_true', help='Run linear layer tests')
     
     args = parser.parse_args()
     
@@ -254,12 +256,13 @@ if __name__ == "__main__":
             return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
                    for shape in input_shapes]
         test_operation(
-            f"matmul: ({N}, {D}) @ ({D}, {N})",
+            f"matmul: ({B}, {D}) @ ({D}, {D*4})",
             triton_matmul,
             torch_matmul,
-            inputs_list([(N, D), (D, N)]),
+            inputs_list([(B, D), (D, D*4)]),
             atol=5e-2, # matmul gradient accumulation is VERY sensitive to flop error even at fp32
             rtol=1e5, # relative error is dummb bc when it's relative to 1e-6 everything looks big
+            # or at least that's what i think is happening; lmk if you find an error i couldn't
         )
         test_operation(
             f"matmul with leading dimensions: ({B}, {H}, {N}, {D}) @ ({B}, {H}, {D}, {N})",
@@ -440,6 +443,30 @@ if __name__ == "__main__":
             triton_idx,
             torch_idx,
             inputs_list([(B, N, V)]),
+        )
+        
+    ### LINEAR LAYER
+    if args.all or args.linear:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        triton_model =  nn.Linear(D, D*4)
+        torch_model = torch.nn.Linear(D, D*4, device=device, dtype=torch.float32)
+        # because they both initialize randomly we need to set one to the other
+        torch_model.weight.data = triton_model.weight.transpose().data.detach().clone()
+            # for some reason pytorch stores the weight matrix transposed
+        if triton_model.bias is not None:
+            torch_model.bias.data = triton_model.bias.data.detach().clone()
+        def triton_linear(x): return triton_model(x)
+        def torch_linear(x): return torch_model(x)
+        test_operation(
+            f"linear layer: ({B}, {N}, {D}) -> ({D}, {D*4})",
+            triton_linear,
+            torch_linear,
+            inputs_list([(B, N, D)]),
+            atol=5e-2, # matmul gradient accumulation is VERY sensitive to flop error even at fp32
+            rtol=1e5, # relative error is dummb bc when it's relative to 1e-6 everything looks big
+            # or at least that's what i think is happening; lmk if you find an error i couldn't
         )
 
         

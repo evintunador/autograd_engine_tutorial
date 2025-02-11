@@ -125,7 +125,7 @@ class TritonTensor:
                     n_elements, loop_stride,
                     OP=op, 
                 )
-            if self.requires_grad:
+            if other.requires_grad:
                 elementwise.binary_op_backward_dy[grid](
                     self.data, other.data,
                     other.grad, 
@@ -168,7 +168,7 @@ class TritonTensor:
             f'matmul inputs must be tensors or matrices, not vectors, but got A.ndim={self.ndim}, B.ndim={other.ndim}'
         assert self.ndim >= other.ndim, \
             f'matmul only supports broadcasting second input tensor, meaning B must have equal to or fewer dims than A'
-        assert self.shape[-2] == other.shape[-1], \
+        assert self.shape[-1] == other.shape[-2], \
             f'incompatible dimensions for matmul, A: {self.shape} and B: {other.shape}'
         if other.ndim > 2:
             assert self.shape[:-2] == other.shape[:-2], \
@@ -455,5 +455,5 @@ class Parameter(TritonTensor):
     Typically used for model weights and biases in neural network layers.
     By default, Parameters require gradients.
     """
-    def __init__(self, data: Union[float, int, np.ndarray]):
-        super().__init__(data, requires_grad=True)
+    def __init__(self, data: Union[float, int, torch.tensor], device=None):
+        super().__init__(data, requires_grad=True, device=device)
