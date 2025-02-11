@@ -53,10 +53,10 @@ def reduction_op_forward(
         y = tl.min(x, axis=1)
     if op == "var":
         err = x - tl.sum(x, axis=1, keep_dims=True)
-        y = tl.sum(err * err, axis=1) / row_len
+        y = tl.sum(err * err, axis=1) / (row_len - 1)
     if op == "std":
         err = x - tl.sum(x, axis=1, keep_dims=True)
-        y = tl.sum(err * err, axis=1) / row_len
+        y = tl.sum(err * err, axis=1) / (row_len - 1)
         y = tl.sqrt(y)
 
     # Store result
@@ -103,18 +103,54 @@ def reduction_op_backward(
     if op == "mean":
         dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
     if op == "var":
+        # Out = Var(x) = sum((x - mean(x)) ** 2) / (n-1) 
+        # Breaking down into nested functions:
+        # mean = sum(x) / n
+        # y = x - mean
+        # z = y ** 2
+        # Out = sum(z) / (n-1)
+        # Chain rule: dLdx = dLdOut * dOutdz * dzdy * dydx
+        # where:
+        # dydx = 1 - 1/n
+        # dzdy = 2y 
+        # dOutdz = 1/(n-1)
+
         x = tl.load(x_ptr + x_offsets, mask=x_mask)
         mean = tl.sum(x, axis=1, keep_dims=True) / row_len
+            # i think it makes more sense to re-calculate mean here than it would to
+            # invest the memory read/writes into storing it during the fwd pass for use now
+        dydx = tl.full(mean.shape, 1.0, tl.float32) - (1.0 / row_len)
+        y = x - mean
+        dzdy = 2.0 * y
+        dOutdz = 1.0 / (row_len - 1)
+        dLdOut = tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        dLdx += dLdOut * dOutdz * dzdy * dydx
+    if op == "std":
+        # Out = Std(x) = sqrt(Var(x)) = sqrt(sum((x - mean(x)) ** 2) / (n-1))
+        # Breaking down into nested functions:
+        # mean = sum(x) / n
+        # y = x - mean
+        # z = y ** 2
+        # w = sum(z) / (n-1)  [this is variance]
+        # Out = sqrt(w)
+        # Chain rule: dLdx = dLdOut * dOutdw * dwdz * dzdy * dydx
+        # where:
+        # dydx = 1 - 1/n (from d/dx(x - mean(x)))
+        # dzdy = 2y = 2(x - mean)
+        # dwdz = 1/(n-1)
+        # dOutdw = 0.5 * (w)**(-0.5)
 
-        dydx = (tl.zeros_like(mean) + 1.0) - (mean / row_len)
-        
-        err = x - mean
-        dzdy = 2 * err
-
-        var = tl.sum(err * err, axis=1, keep_dims=True) / row_len
-        dOutdz = var / row_len
-
-        dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) * dOutdz * dzdy * dydx
+        x = tl.load(x_ptr + x_offsets, mask=x_mask)
+        mean = tl.sum(x, axis=1, keep_dims=True) / row_len
+        dydx = tl.full(mean.shape, 1.0, tl.float32) - (1.0 / row_len)
+        y = x - mean
+        dzdy = 2.0 * y
+        dwdz = 1.0 / (row_len - 1)
+        # Calculate variance (w) for dOutdw
+        w = tl.sum(y * y, axis=1, keep_dims=True) / (row_len - 1)
+        dOutdw = 0.5 * tl.rsqrt(w)
+        dLdOut = tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        dLdx += dLdOut * dOutdw * dwdz * dzdy * dydx
 
     # Store result
     tl.store(dLdx_ptr + x_offsets, dLdx, mask=x_mask)

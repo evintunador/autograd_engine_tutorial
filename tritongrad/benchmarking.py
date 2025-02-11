@@ -455,6 +455,7 @@ class _reduction(torch.autograd.Function):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
         )
 
+        ctx.save_for_backward(x)
         ctx.op_name = op_name
         ctx.BLOCK_SIZE_N = BLOCK_SIZE_N
         ctx.n_cols = n_cols
@@ -463,11 +464,12 @@ class _reduction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        #a, b = ctx.saved_tensors
-        dx = torch.empty(dy.shape + (ctx.n_cols,), device=dy.device, dtype=dy.dtype)
+        x, = ctx.saved_tensors
+        dx = torch.empty(x.shape, device=dy.device, dtype=dy.dtype)
         grid = ctx.grid
         
         reduction_ops.reduction_op_backward[grid](
+            x,
             dx, dy,
             dx.numel(), dy.numel(),
             dx.stride()[-2], ctx.n_cols, 
@@ -486,6 +488,10 @@ def get_reduction_args(args):
         ops.append("sum")
     if args.all or args.mean:
         ops.append("mean")
+    if args.all or args.var:
+        ops.append("var")
+    if args.all or args.std:
+        ops.append("std")
     return ops
 
 # First define an empty list that will be populated before the decorator is used
@@ -530,6 +536,10 @@ def benchmark_reduction(tot_elements, provider, op, mode, device=DEVICE):
         fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.sum(X, dim=1)
     elif op == "mean":
         fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.mean(X, dim=1)
+    elif op == "var":
+        fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.var(X, dim=1)
+    elif op == "std":
+        fn = lambda: reduction_fn(X, op) if provider == 'triton' else torch.std(X, dim=1)
     if mode == "bwd":
         O = fn()
         dO = torch.randn_like(O)
@@ -542,8 +552,11 @@ def benchmark_reduction(tot_elements, provider, op, mode, device=DEVICE):
         # 2 = number of memory operations (1 read + 1 write)
         # 4) = bytes per element (for float32)
         # 1e-9 converts bytes to GB
-    else: # bwd pass of sum
+    elif mode == "bwd" and op in ("sum", "mean"):
         gb = 2 * tot_elements * 4 * 1e-9
+    elif mode == "bwd" and op in ("var", "std"):
+        gb = 3 * tot_elements * 4 * 1e-9
+        # TODO should these two use TFLOPs instead of GB/s? not worth putting in the effort to change tbh
     # 1e-3 converts milliseconds to seconds
     ms = triton.testing.do_bench(fn)
     return gb / (ms * 1e-3)
@@ -564,6 +577,8 @@ if __name__ == "__main__":
     parser.add_argument('--matmul', action='store_true', help='Run matrix multiplication benchmarks')
     parser.add_argument('--sum', action='store_true', help='Run summation benchmarks')
     parser.add_argument('--mean', action='store_true', help='Run mean benchmarks')
+    parser.add_argument('--var', action='store_true', help='Run variance benchmarks')
+    parser.add_argument('--std', action='store_true', help='Run standard deviation benchmarks')
     
     args = parser.parse_args()
     
