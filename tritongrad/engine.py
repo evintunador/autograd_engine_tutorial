@@ -343,66 +343,70 @@ class TritonTensor:
     def std(self, dim=-1, keepdim=False):
         return self._reduction(op='std')
 
-    def transpose(self, axes=None):
-        if axes is None:  # defaults to transposing final two dims
-            axes = tuple(dim for dim in range(self.ndim - 2)) + (self.ndim - 1, self.ndim - 2)
-        out = TritonTensor(self.data.permute(axes), self.requires_grad, (self,))
+    def transpose(self, dim0 = None, dim1 = None):
+        # i don't care enough about shape operations to do custom kernels for them
+        # you'll see how we transpose in the attention implementation
+        if dim0 is None and dim1 is None:
+            dim0, dim1 = -1, -2
+        out = TritonTensor(self.data.transpose(dim0, dim1), 
+                            self.requires_grad, self.device, (self,))
         def _backward():
             if self.requires_grad:
-                self.grad += out.grad.permute(axes)
+                self.grad += out.grad.transpose(dim0, dim1)
         out._backward = _backward
         return out
 
     def squeeze(self, dim):
         # i don't care enough about shape operations to do custom kernels for them
-        out = TritonTensor(torch.squeeze(self.data, axis=dim), self.requires_grad, (self,))
+        out = TritonTensor(torch.squeeze(self.data, dim), 
+                            self.requires_grad, self.device, (self,))
         def _backward():
             if self.requires_grad:
-                self.grad += torch.expand_dims(out.grad, axis=dim)
+                self.grad += torch.unsqueeze(out.grad, dim)
         out._backward = _backward
         return out
         
     def unsqueeze(self, dim):
         # i don't care enough about shape operations to do custom kernels for them
-        out = TritonTensor(torch.expand_dims(self.data, axis=dim), self.requires_grad, (self,))
+        out = TritonTensor(torch.unsqueeze(self.data, dim), 
+                            self.requires_grad, self.device, (self,))
         def _backward():
             if self.requires_grad:
-                self.grad += torch.squeeze(out.grad, axis=dim)
+                self.grad += torch.squeeze(out.grad, dim)
         out._backward = _backward
         return out
 
+    """
+    # i don't think we'll use broadcasting unless we implement GQA/MQA, but we plan to do MHA
+    # if we do need it we can come back later
     def broadcast_to(self, shape):
-        if self.shape == shape:
-            return self
-        for i in range(self.ndim):
-            if self.shape[i] != shape[i]:
-                dim = i
-        assert self.shape[dim] == 1, f"original shape must be 1 on dimension to be broadcast but is {self.shape[dim]}"
-        out = TritonTensor(self.data.expand(shape), self.requires_grad, (self,))
+        out = TritonTensor(self.data.expand(shape), 
+                            self.requires_grad, self.device, (self,))
         def _backward():
             if self.requires_grad:
                 self.grad += out.grad.sum(dim=dim, keepdim=True)
         out._backward = _backward
         return out
+    """
 
     def reshape(self, shape):
         # i don't care enough about shape operations to do custom kernels for them
-        out = Tensor(np.reshape(self.data, shape), self.requires_grad, (self,))
+        out = TritonTensor(torch.reshape(self.data, shape), 
+                            self.requires_grad, self.device, (self,))
         def _backward():
             if self.requires_grad:
-                self.grad += np.reshape(out.grad, self.shape)
+                self.grad += torch.reshape(out.grad, self.shape)
         out._backward = _backward
         return out
 
     def __getitem__(self, idx):
+        print(type(idx[0]), idx)
         # i don't care enough about shape operations to do custom kernels for them
-        # pytorch handles the actual indexing behavior for us
-        sliced_data = self.data[idx]
-        out = TritonTensor(sliced_data, self.requires_grad, _children=(self,))
+        out = TritonTensor(self.data[idx], self.requires_grad, self.device, (self,))
         def _backward():
-            if self.requires_grad:
-                # Use index_add_ to accumulate gradients at the indexed positions
-                self.grad += torch.zeros_like(self.grad).index_add_(0, idx, out.grad)
+            # bwd pass of splicing never gets used so we'll just not bother with it
+            # this does mean the testing.py bwd pass test is expected to fail
+            pass
         out._backward = _backward
         return out
 

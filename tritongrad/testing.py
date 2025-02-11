@@ -37,7 +37,7 @@ def test_operation(op_name: str,
     #with torch.autocast(device_type='cuda', dtype=torch.float32):
     torch_out = torch_fn(*torch_inputs)
     torch_out = torch_out[0] if op_name[:3] in ("min", "max") else torch_out
-        # TODO do we need our max op to also give indices?
+        # TODO do we need our max op to also give indices? i think so for inference
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
@@ -86,7 +86,10 @@ if __name__ == "__main__":
     parser.add_argument('--var', action='store_true', help='Run variance across final dimension tests')
     parser.add_argument('--std', action='store_true', help='Run standard deviation across final dimension tests')
     parser.add_argument('--trans', action='store_true', help='Run transpose across arbitrary axes tests')
-
+    parser.add_argument('--sqz', action='store_true', help='Run squeeze across arbitrary axes tests')
+    parser.add_argument('--unsqz', action='store_true', help='Run unsqueeze across arbitrary axes tests')
+    parser.add_argument('--reshape', action='store_true', help='Run reshape tests')
+    parser.add_argument('--idx', action='store_true', help='Run indexing tests')
     
     args = parser.parse_args()
     
@@ -95,7 +98,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D = 4, 1024, 8, 384
+    B, N, H, D, V = 4, 1024, 8, 384, 4096
         
     ### EXPONENTIATION
     if args.all or args.exp:
@@ -358,4 +361,85 @@ if __name__ == "__main__":
             torch_std,
             inputs_list([(B, N, D)]),
         )
+        
+    ### TRANSPOSE
+    if args.all or args.trans:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        def triton_trans(x): return x.transpose(-2, -3)
+        def torch_trans(x): return torch.transpose(x, -2, -3)
+        test_operation(
+            f"transpose: ({B}, {N}, {H}, {D}) -> ({B}, {H}, {N}, {D})",
+            triton_trans,
+            torch_trans,
+            inputs_list([(B, N, H, D)]),
+        )
+        # this one should default to final two dims
+        def triton_trans(x): return x.transpose()
+        def torch_trans(x): return torch.transpose(x, -1, -2)
+        test_operation(
+            f"transpose: ({B}, {H}, {N}, {D}) -> ({B}, {H}, {D}, {N})",
+            triton_trans,
+            torch_trans,
+            inputs_list([(B, H, N, D)]),
+        )
+        
+    ### SQUEEZE
+    if args.all or args.sqz:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        def triton_sqz(x): return x.squeeze(2)
+        def torch_sqz(x): return torch.squeeze(x, 2)
+        test_operation(
+            f"squeeze: ({B}, {N}, {1}, {D}) -> ({B}, {N}, {D})",
+            triton_sqz,
+            torch_sqz,
+            inputs_list([(B, N, 1, D)]),
+        )
+        
+    ### UNSQUEEZE
+    if args.all or args.unsqz:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        def triton_unsqz(x): return x.unsqueeze(2)
+        def torch_unsqz(x): return torch.unsqueeze(x, 2)
+        test_operation(
+            f"squeeze: ({B}, {N}, {D}) -> ({B}, {N}, {1}, {D})",
+            triton_unsqz,
+            torch_unsqz,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### RESHAPE
+    if args.all or args.reshape:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        def triton_reshape(x): return x.reshape((B, N, 4, D//4))
+        def torch_reshape(x): return torch.reshape(x, (B, N, 4, D//4))
+        test_operation(
+            f"reshape: ({B}, {N}, {D}) -> ({B}, {N}, {4}, {D//4})",
+            triton_reshape,
+            torch_reshape,
+            inputs_list([(B, N, D)]),
+        )
+        
+    ### INDEXING
+    # NOTE: we expect the bwd pass of idx to fail since we didn't implement it
+    if args.all or args.idx:
+        def inputs_list(input_shapes):
+            return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
+                   for shape in input_shapes]
+        def triton_idx(x): return x[:,-1,:]
+        def torch_idx(x): return x[:,-1,:]
+        test_operation(
+            f"index: ({B}, {N}, {V})[:,-1,:] -> ({B}, {1}, {V})",
+            triton_idx,
+            torch_idx,
+            inputs_list([(B, N, V)]),
+        )
+
         
