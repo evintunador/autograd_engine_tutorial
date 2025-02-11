@@ -322,6 +322,7 @@ class TritonTensor:
         def _backward():
             if self.requires_grad:
                 reduction_ops.reduction_op_backward[grid](
+                    self.data,
                     self.grad, out.grad,
                     self.grad.numel(), out.grad.numel(),
                     self.data.stride()[-2], n_cols, 

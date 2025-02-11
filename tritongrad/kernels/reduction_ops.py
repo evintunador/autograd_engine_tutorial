@@ -40,22 +40,22 @@ def reduction_op_forward(
     
     # Load data
     mask = (row_idx[:, None] < (x_num_elements // row_len)) & (col_idx[None, :] < row_len)
-    x_block = tl.load(x_ptr + x_offsets, mask=mask)
+    x = tl.load(x_ptr + x_offsets, mask=mask)
     
     # Perform reduction
     if op == "sum":
-        y = tl.sum(x_block, axis=1)
+        y = tl.sum(x, axis=1)
     if op == "mean":
-        y = tl.sum(x_block, axis=1) / row_len
+        y = tl.sum(x, axis=1) / row_len
     if op == "max":
-        y = tl.max(x_block, axis=1)
+        y = tl.max(x, axis=1)
     if op == "min":
-        y = tl.min(x_block, axis=1)
+        y = tl.min(x, axis=1)
     if op == "var":
-        err = x_block - tl.sum(x_block, axis=1, keep_dims=True)
+        err = x - tl.sum(x, axis=1, keep_dims=True)
         y = tl.sum(err * err, axis=1) / row_len
     if op == "std":
-        err = x_block - tl.sum(x_block, axis=1, keep_dims=True)
+        err = x - tl.sum(x, axis=1, keep_dims=True)
         y = tl.sum(err * err, axis=1) / row_len
         y = tl.sqrt(y)
 
@@ -71,14 +71,15 @@ def reduction_op_forward(
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4, 8]
     ],
-    key=["dx_num_elements"],
+    key=["x_num_elements"],
 )
 @triton.jit
 def reduction_op_backward(
-    dx_ptr,
-    dy_ptr,
-    dx_num_elements,
-    dy_num_elements,
+    x_ptr,
+    dLdx_ptr,
+    dLdOut_ptr,
+    x_num_elements,
+    dLdOut_num_elements,
     stride_row,                     # number of places to move forward in memory to get to same entry of next row
     row_len: tl.constexpr,          # row length; used in determining BLOCK_SIZE_N
     op: tl.constexpr,
@@ -86,27 +87,34 @@ def reduction_op_backward(
     BLOCK_SIZE_N: tl.constexpr,     # must be smaller than SRAM and greater than final dim length
 ):
     pid = tl.program_id(axis=0)
-    row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     
     # Load data
-    mask = row_idx < dy_num_elements 
-    dy_block = tl.load(dy_ptr + row_idx, mask=mask)
+    row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    col_idx = tl.arange(0, BLOCK_SIZE_N)
+    x_offsets = row_idx[:, None] * stride_row + col_idx[None, :]
+    x_mask = (row_idx[:, None] < (x_num_elements // row_len)) & (col_idx[None, :] < row_len)
+    dLdx = tl.load(dLdx_ptr + x_offsets, mask=x_mask)
+    dLdOut_mask = row_idx < dLdOut_num_elements 
+    dLdOut = tl.load(dLdOut_ptr + row_idx, mask=dLdOut_mask)
     
     # Perform broadcasting up to input shape & any other gradient calcs
     if op == "sum":
-        dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
     if op == "mean":
-        dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
+        dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
     if op == "var":
-        # y = sqrt(sum((x - mean) ** 2) / row_len)
-        # dL/dx = dL/dy * dy
-        0.5 * tl.rsqrt(x)
-        d_mean = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
+        x = tl.load(x_ptr + x_offsets, mask=x_mask)
+        mean = tl.sum(x, axis=1, keep_dims=True) / row_len
 
-    if op == "std":
-    
+        dydx = (tl.zeros_like(mean) + 1.0) - (mean / row_len)
+        
+        err = x - mean
+        dzdy = 2 * err
+
+        var = tl.sum(err * err, axis=1, keep_dims=True) / row_len
+        dOutdz = var / row_len
+
+        dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) * dOutdz * dzdy * dydx
+
     # Store result
-    col_idx = tl.arange(0, BLOCK_SIZE_N)
-    dx_offsets = row_idx[:, None] * stride_row + col_idx[None, :]
-    store_mask = (row_idx[:, None] < (dx_num_elements // row_len)) & (col_idx[None, :] < row_len)
-    tl.store(dx_ptr + dx_offsets, dx_block, mask=store_mask)
+    tl.store(dLdx_ptr + x_offsets, dLdx, mask=x_mask)
