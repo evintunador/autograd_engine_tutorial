@@ -97,6 +97,13 @@ def reduction_op_backward(
         dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
     if op == "mean":
         dx_block = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
+    if op == "var":
+        # y = sqrt(sum((x - mean) ** 2) / row_len)
+        # dL/dx = dL/dy * dy
+        0.5 * tl.rsqrt(x)
+        d_mean = tl.broadcast_to(dy_block[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
+
+    if op == "std":
     
     # Store result
     col_idx = tl.arange(0, BLOCK_SIZE_N)
