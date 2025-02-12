@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from engine import TritonTensor
-from kernels import elementwise, matmul, reduction_ops
+from kernels import elementwise, matmul, reduction_ops, modules
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
@@ -562,6 +562,129 @@ def benchmark_reduction(tot_elements, provider, op, mode, device=DEVICE):
     return gb / (ms * 1e-3)
 
 
+########################################################################################
+########################### Embedding Module ############################################
+########################################################################################
+
+class _embedding(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, tokens, E): 
+        """
+        implementation of embedding module
+        """
+        (B, N), (V, D) = tokens.shape, E.shape
+
+        # allocates output
+        x = torch.empty((B, N, D), device=E.device, dtype=E.dtype)
+
+        grid = lambda meta: (
+            triton.cdiv(B*N, meta['BLOCK_SIZE_ROWS']), 
+            triton.cdiv(D, meta['BLOCK_SIZE_COLS'])
+            )
+        modules.embedding_forward[grid](
+            tokens,
+            E,
+            x,
+            tokens.stride(0), tokens.stride(1),
+            E.stride(0), E.stride(1),
+            x.stride(0), x.stride(1), x.stride(2),
+            N, D, V,
+            tokens.numel(), E.numel(), x.numel(),
+        )
+
+        ctx.save_for_backward(tokens)
+        ctx.grid = grid
+        ctx.B, ctx.N, ctx.D, ctx.V = B, N, D, V
+        return x
+
+    @staticmethod
+    def backward(ctx, dLdx):
+        tokens, = ctx.saved_tensors
+        grid = ctx.grid
+        B, N, D, V = ctx.B, ctx.N, ctx.D, ctx.V
+        dLdE = torch.empty((V, D), device=dLdx.device, dtype=dLdx.dtype)
+        
+        modules.embedding_backward[grid](
+            tokens,
+            dLdE,
+            dLdx,
+            tokens.stride(0), tokens.stride(1),
+            dLdE.stride(0), dLdE.stride(1),
+            dLdx.stride(0), dLdx.stride(1), dLdx.stride(2),
+            N, D, V,
+            tokens.numel(), dLdE.numel(), dLdx.numel(),
+        )
+
+        return None, dLdE
+
+embedding_fn = _embedding.apply
+
+# Define the operations list based on input args
+def get_embedding_args(args):
+    ops = []
+    if args.all or args.emb:
+        ops.append("emb")
+    return ops
+# TODO i wrote it this way assuming i'd change embedding fn to all module fn's later but idk
+
+# First define an empty list that will be populated before the decorator is used
+embedding_configs = []
+def generate_embedding_configs(ops):
+    configs = []
+    for op in ops:
+        for mode in ["fwd", "bwd"]:
+            configs.append(
+                triton.testing.Benchmark(
+                    x_names=['vocab_size'], # TODO can i scale vocab size & embed dim separately?
+                    x_vals=[2**i for i in range(10, 20, 1)],
+                    line_arg='provider',
+                    line_vals=['torch', 'triton'],
+                    line_names=['PyTorch', 'Triton'],
+                    styles=[('blue', '-'), ('red', '-')],
+                    ylabel='GB/s',
+                    xlabel="Vocabulary Size (embed dim is 768)",
+                    plot_name=f'{op}_{mode}',
+                    args={"op": op, "mode": mode,}, # TODO maybe use this for diff embed dims?
+                ))
+    return configs
+
+@triton.testing.perf_report(embedding_configs)
+def benchmark_embedding(vocab_size, provider, op, mode, device=DEVICE):
+    """
+    Benchmark Triton embedding kernels against PyTorch.
+    """
+    # Generate input data
+    B, N, D = 32, 2048, 768
+    tokens = torch.randint(0, vocab_size, size=(B, N), device=device)
+    E = torch.randn((vocab_size, D), device=device, requires_grad=True)
+    
+    # Select implementation
+    if provider == 'triton':
+        fn = lambda: embedding_fn(tokens, E) 
+    else: 
+        fn = lambda: torch.nn.functional.embedding(tokens, E)
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO, retain_graph=True)
+    
+    # Benchmark
+    tokens_gb = 1 * B*N * 4 * 1e-9
+        # 1 -> we read tokens from mem once
+        # 4 -> bytes per element 
+            # even though we use tokens as tl.int32 in reality triton loads it as tl.float32
+        # 1e-9 converts bytes to GB
+    E_gb = 1 * B*N*D * 4 * 1e-9
+        # 1 -> read (fwd) or write (bwd) to/from E once
+    x_gb = 1 * B*N*D * 4 * 1e-9
+        # 1 -> ead (fwd) or write (bwd) to/from
+    gb = tokens_gb + E_gb + x_gb
+    # 1e-3 converts milliseconds to seconds
+    ms = triton.testing.do_bench(fn)
+    return gb / (ms * 1e-3)
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -579,6 +702,7 @@ if __name__ == "__main__":
     parser.add_argument('--mean', action='store_true', help='Run mean benchmarks')
     parser.add_argument('--var', action='store_true', help='Run variance benchmarks')
     parser.add_argument('--std', action='store_true', help='Run standard deviation benchmarks')
+    parser.add_argument('--emb', action='store_true', help='Run embedding module benchmarks')
     
     args = parser.parse_args()
     
@@ -612,3 +736,9 @@ if __name__ == "__main__":
         print("\nRunning reduction operation benchmarks...")
         reduction_configs.extend(generate_reduction_configs(reduction_args))
         benchmark_reduction.run(print_data=True, save_path='./benchmarks/')
+
+    embedding_args = get_embedding_args(args)
+    if embedding_args:
+        print("\nRunning embedding module benchmarks...")
+        embedding_configs.extend(generate_embedding_configs(embedding_args))
+        benchmark_embedding.run(print_data=True, save_path='./benchmarks/')
