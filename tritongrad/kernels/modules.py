@@ -93,12 +93,13 @@ def embedding_backward(
 
 @triton.autotune( 
     [
-        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE in [1, 2, 4, 8, 16, 32]
+        triton.Config({"BLOCK_SIZE_ROWS": BLOCK_SIZE_ROWS}, 
+                        num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_ROWS in [1, 2, 4, 8, 16, 32]
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4, 8]
     ],
-    key=["D"],
+    key=["BLOCK_SIZE_COLS"],
 )
 @triton.jit
 def layernorm_forward(
@@ -106,26 +107,32 @@ def layernorm_forward(
     x_N_stride, x_D_stride,
     w_D_stride, b_D_stride,
     y_N_stride, y_D_stride,
-    rows, D,
+    rows, D, 
     eps,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_SIZE_COLS: tl.constexpr,
+    BLOCK_SIZE_ROWS: tl.constexpr,
 ):
     pid = tl.program_id(0)
+    row_offsets = pid * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)[:, None]
+    col_offsets = tl.arange(0, BLOCK_SIZE_COLS)[None, :]
 
-    # TODO x offsets & mask
-    x = tl.load(x_ptr + ?, mask=?)
-
+    x_offsets = row_offsets * x_N_stride + col_offsets * x_D_stride
+    x_mask = (row_offsets < rows) & (col_offsets < D)
+    x = tl.load(x_ptr + x_offsets, mask=x_mask)#, other=0.0
+    # TODO do we put zeros in for the masked out values? calcs don't work then. let it stay empty?
     mean = tl.sum(x, axis=1, keep_dims=True) / D
     err = x - mean
     var = tl.sum(err * err, axis=1, keep_dims=True) / (D - 1)
     sd = tl.sqrt(var + eps)
     x_normalized = err / sd
 
-    # TODO w&b offsets & mask
-    w = tl.load(w_ptr + ?, mask=?)
-    b = tl.load(b_ptr + ?, mask=?)
+    tl.static_assert(w_D_stride == b_D_stride)
+    wb_offsets = col_offsets * w_D_stride
+    wb_mask = col_offsets < D
+    w = tl.load(w_ptr + wb_offsets, mask=wb_mask)
+    b = tl.load(b_ptr + wb_offsets, mask=wb_mask)
     x_shifted = x_normalized * w + b 
 
-    # TODO y offsets * mask
-    tl.store(y_ptr + ?, x_shifted, mask=?)
+    # Y can reuse offsets & mask from X
+    tl.store(y_ptr + x_offsets, x_shifted, mask=x_mask)
 

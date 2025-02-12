@@ -158,21 +158,27 @@ class LayerNorm(Module):
 
     def __call__(self, x: TritonTensor):
         D = x.shape[-1]
-        assert D == normalized_shape
+        assert D == self.normalized_shape
         preceeding_dims = math.prod(x.shape[:-1])
 
         # get tensor dimensions to ensure our parallelization scheme will work
-        row_len = triton.next_power_of_2(D)
+        BLOCK_SIZE_COLS = triton.next_power_of_2(D)
         # 4 for the 4 bytes in fp32
-        assert row_len * 4 < TOTAL_SRAM_PER_SM, \
-            f"vectors (each size {row_len * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+        assert BLOCK_SIZE_COLS * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_COLS * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
 
         # pre-allocate output
         output = torch.empty_like(x, requires_grad=False)
 
-        grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE']))
+        grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE_ROWS']))
         vectorwise.layernorm_forward[grid](
-
+            x.data, self.weight.data, self.bias.data, output,
+            x.data.stride(-2), x.data.stride(-1),
+            self.weight.data.stride(0), self.bias.data.stride(0),
+            y.stride(-2), y.stride(-1),
+            preceeding_dims, D,
+            self.eps,
+            BLOCK_SIZE_COLS
         )
 
         # wrap output in a triton tensor to add it to our graph
@@ -183,9 +189,11 @@ class LayerNorm(Module):
         )
 
         def _backward():
+            """
             vectorwise.layernorm_backward[grid](
 
-            )
+            )"""
+            pass
         out.backward = _backward
         return out
 
