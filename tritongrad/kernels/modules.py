@@ -24,7 +24,7 @@ def embedding_forward(
     e_V_stride, e_D_stride,
     x_B_stride, x_N_stride, x_D_stride,
     N, D, V,
-    x_num_elements,
+    ids_num_elements, e_num_elements, x_num_elements,
     BLOCK_SIZE_ROWS: tl.constexpr,
     BLOCK_SIZE_COLS: tl.constexpr,
 ):
@@ -35,7 +35,10 @@ def embedding_forward(
 
     ids_offsets = row_offsets * ids_N_stride
     ids_mask = row_offsets < ids_num_elements
-    ids = tl.load(ids_ptr + ids_offsets, mask=ids_mask)
+    ids = tl.load(ids_ptr + ids_offsets, mask=ids_mask).to(tl.int32)
+        # i think pytorch uses int64 for embeddings but since we'll only ever have
+        #  a relatively small vocab size this can save us some memory. 
+        # also FYI Triton doesn't support int8 nor int16
 
     e_offsets = ids[:, None] * e_V_stride + col_offsets[None, :] * e_D_stride
     e_mask = (ids[:, None] < V) & (col_offsets[None, :] < D)

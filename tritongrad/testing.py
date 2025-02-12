@@ -31,8 +31,8 @@ def test_operation(op_name: str,
     print(f"\nTesting {op_name}...")
     
     # Generate random inputs
-    torch_inputs = [x.detach().clone().requires_grad_(True) for x in inputs_list]  # Create leaf tensors
-    triton_inputs = [TritonTensor(x, requires_grad=True) for x in inputs_list]
+    torch_inputs = [x.detach().clone().requires_grad_(x.requires_grad) for x in inputs_list]  # Create leaf tensors
+    triton_inputs = [TritonTensor(x, requires_grad=x.requires_grad) for x in inputs_list]
     
     # Forward pass
     #with torch.autocast(device_type='cuda', dtype=torch.float32):
@@ -42,7 +42,9 @@ def test_operation(op_name: str,
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
-    torch.testing.assert_close(triton_out.data, torch_out, atol=atol, rtol=float("inf"))
+    #print(torch_out)
+    #print(triton_out)
+    torch.testing.assert_close(torch_out, triton_out.data, atol=atol, rtol=float("inf"))
     print(f"✓ Forward pass matches")
     
     # before computing the backward pass, we need to let the autotuner run.
@@ -50,7 +52,7 @@ def test_operation(op_name: str,
     #  to incorrect values
     zero_grad = torch.zeros_like(torch_out)
     triton_out.backward(zero_grad)
-    # and in order to avoid any potential divide by zero Nan's, we also set all gradients to 0
+    # and in order to avoid any potential divide by zero Nan's from division, we set all gradients to 0
     triton_out.zero_grad_backward()
 
     # Backward pass
@@ -60,9 +62,9 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        #print(torch_input.grad, torch_input.shape)
-        #print(triton_input.grad, triton_input.shape)
-        torch.testing.assert_close(triton_input.grad, torch_input.grad, atol=atol, rtol=rtol)
+        print(torch_input.grad, torch_input.shape)
+        print(triton_input.grad, triton_input.shape)
+        torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
     print(f"✓ Backward pass matches")
     
 
@@ -473,19 +475,27 @@ if __name__ == "__main__":
     ### EMBEDDING LAYER
     if args.all or args.emb:
         def inputs_list(input_shapes):
-            return [torch.randint(0, V, size=shape, dtype=torch.int32, device=device)
-                    for shape in input_shapes] 
-        triton_model =  nn.Embedding(V, D)
+            tokens = torch.randint(0, V, size=input_shapes[0], dtype=torch.int64, device=device) 
+            weights = torch.randn(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
+            return [tokens, weights]
+        triton_model = nn.Embedding(V, D)
         torch_model = torch.nn.Embedding(V, D, device=device, dtype=torch.float32)
-        # because they both initialize randomly we need to set one to the other
-        torch_model.weight.data = triton_model.weight.data.detach().clone()
-        def triton_embedding(x): return triton_model(x)
-        def torch_embedding(x): return torch_model(x)
+        # because they both initialize randomly we need to set their weights to the same matrix
+        def triton_embedding(tokens, weights): 
+            #triton_model.weight.data = weights.data#.detach().clone().requires_grad_(False)
+            # this direct assignment is kinda weird since we're assigning a TritonTensor to what
+            #  previously was a Parameter but it's prolly fine
+            triton_model.weight = weights 
+            return triton_model(tokens)
+        def torch_embedding(tokens, weights): 
+            return torch.nn.functional.embedding(tokens, weights)
         test_operation(
             f"embedding layer: ({B}, {N}) & ({V}, {D}) -> ({B}, {N}, {D})",
             triton_embedding,
             torch_embedding,
-            inputs_list([(B, N)]),
+            inputs_list([(B, N), (V, D)]),
         )
+        # gradients of (B, N) will be None
+        # gradients of (V, D) are what we care about
 
         

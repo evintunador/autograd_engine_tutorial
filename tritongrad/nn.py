@@ -87,7 +87,7 @@ class Embedding(Module):
         
         # pre-allocate output
         output = torch.empty(
-            (B, D, self.embedding_dim), 
+            (B, N, self.embedding_dim), 
             dtype=self.weight.dtype, 
             device=self.weight.device, 
             requires_grad=True
@@ -95,7 +95,7 @@ class Embedding(Module):
 
         grid = lambda meta: (
             triton.cdiv(B*N, meta['BLOCK_SIZE_ROWS']), 
-            triton.cdiv(D, meta['BLOCK_SIZE_COLS'])
+            triton.cdiv(self.embedding_dim, meta['BLOCK_SIZE_COLS'])
             )
         modules.embedding_forward[grid](
             tokens.data,
@@ -104,8 +104,8 @@ class Embedding(Module):
             tokens.data.stride(0), tokens.data.stride(1),
             self.weight.data.stride(0), self.weight.data.stride(1),
             output.stride(0), output.stride(1), output.stride(2),
-            N, D, self.num_embeddings,
-            output.numel(),
+            N, self.embedding_dim, self.num_embeddings,
+            tokens.numel(), self.weight.data.numel(), output.numel(),
         )
 
         # Wrap output in TritonTensor with autograd information
