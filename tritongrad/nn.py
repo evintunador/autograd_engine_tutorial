@@ -90,7 +90,7 @@ class Embedding(Module):
             (B, N, self.embedding_dim), 
             dtype=self.weight.dtype, 
             device=self.weight.device, 
-            requires_grad=True
+            requires_grad=False
         )
 
         grid = lambda meta: (
@@ -135,3 +135,4 @@ class Embedding(Module):
 
     def parameters(self):
         return [self.weight]
+

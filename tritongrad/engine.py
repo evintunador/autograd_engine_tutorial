@@ -325,23 +325,26 @@ class TritonTensor:
 
         return out
 
-    def sum(self, dim=None, keepdim=False):
+    def sum(self):
         return self._reduction(op='sum')
 
-    def mean(self, dim=None, keepdim=False):
+    def mean(self):
         return self._reduction(op='mean')
 
-    def max(self, dim=None):
+    def max(self):
         return self._reduction(op='max')
 
-    def min(self, dim=None):
+    def min(self):
         return self._reduction(op='min')
 
-    def var(self, dim=-1, keepdim=False):
+    def var(self):
         return self._reduction(op='var')
 
-    def std(self, dim=-1, keepdim=False):
+    def std(self):
         return self._reduction(op='std')
+
+    def softmax(self):
+        pass
 
     def transpose(self, dim0 = None, dim1 = None):
         # i don't care enough about shape operations to do custom kernels for them
@@ -400,8 +403,8 @@ class TritonTensor:
         return out
 
     def __getitem__(self, idx):
-        print(type(idx[0]), idx)
         # i don't care enough about shape operations to do custom kernels for them
+        # if you'd like to see indexing in triton, check out nn.py's Embedding class
         out = TritonTensor(self.data[idx], self.requires_grad, self.device, (self,))
         def _backward():
             # bwd pass of splicing never gets used so we'll just not bother with it
