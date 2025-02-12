@@ -15,7 +15,7 @@ from math import prod
 import torch
 import triton
 import triton.language as tl
-from kernels import elementwise, matmul, reduction_ops
+from kernels import elementwise, matmul, vectorwise
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
@@ -299,7 +299,7 @@ class TritonTensor:
         # we'll parallelize with multiple rows in a PID
         grid = lambda meta: (triton.cdiv(self.data.numel() // n_cols, meta['BLOCK_SIZE_M']), )
         # Launch kernel
-        reduction_ops.reduction_op_forward[grid](
+        vectorwise.reduction_op_forward[grid](
             self.data, output, 
             self.data.numel(), output.numel(), 
             self.data.stride()[-2], n_cols, 
@@ -313,7 +313,7 @@ class TritonTensor:
         # define our backward pass
         def _backward():
             if self.requires_grad:
-                reduction_ops.reduction_op_backward[grid](
+                vectorwise.reduction_op_backward[grid](
                     self.data,
                     self.grad, out.grad,
                     self.grad.numel(), out.grad.numel(),

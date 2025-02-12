@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from engine import TritonTensor
-from kernels import elementwise, matmul, reduction_ops, modules
+from kernels import elementwise, matmul, vectorwise, modules
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
@@ -447,7 +447,7 @@ class _reduction(torch.autograd.Function):
         # we'll parallelize with multiple rows in a PID
         grid = lambda meta: (triton.cdiv(x.numel() // n_cols, meta['BLOCK_SIZE_M']), )
         # Launch kernel
-        reduction_ops.reduction_op_forward[grid](
+        vectorwise.reduction_op_forward[grid](
             x, y, 
             x.numel(), y.numel(), 
             x.stride()[-2], n_cols, 
@@ -468,7 +468,7 @@ class _reduction(torch.autograd.Function):
         dx = torch.empty(x.shape, device=dy.device, dtype=dy.dtype)
         grid = ctx.grid
         
-        reduction_ops.reduction_op_backward[grid](
+        vectorwise.reduction_op_backward[grid](
             x,
             dx, dy,
             dx.numel(), dy.numel(),
