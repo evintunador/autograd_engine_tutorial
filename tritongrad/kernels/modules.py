@@ -133,6 +133,7 @@ def layernorm_forward(
     b = tl.load(b_ptr + wb_offsets, mask=wb_mask)
     x_shifted = x_normalized * w + b 
 
-    # Y can reuse offsets & mask from X
-    tl.store(y_ptr + x_offsets, x_shifted, mask=x_mask)
+    # TODO Y is guaranteed to have same strides as x right? so could we just reuse x_offsets?
+    y_offsets = row_offsets * y_N_stride + col_offsets * y_D_stride
+    tl.store(y_ptr + y_offsets, x_shifted, mask=x_mask)
 

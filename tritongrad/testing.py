@@ -42,8 +42,8 @@ def test_operation(op_name: str,
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
-    #print(torch_out)
-    #print(triton_out)
+    print(torch_out)
+    print(triton_out)
     torch.testing.assert_close(torch_out, triton_out.data, atol=atol, rtol=float("inf"))
     print(f"✓ Forward pass matches")
     
@@ -95,6 +95,7 @@ if __name__ == "__main__":
     parser.add_argument('--idx', action='store_true', help='Run indexing tests')
     parser.add_argument('--lin', action='store_true', help='Run linear layer tests')
     parser.add_argument('--emb', action='store_true', help='Run embedding layer tests')
+    parser.add_argument('--ln', action='store_true', help='Run LayerNorm module tests')
     
     args = parser.parse_args()
     
@@ -479,10 +480,8 @@ if __name__ == "__main__":
             weights = torch.randn(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
             return [tokens, weights]
         triton_model = nn.Embedding(V, D)
-        torch_model = torch.nn.Embedding(V, D, device=device, dtype=torch.float32)
         # because they both initialize randomly we need to set their weights to the same matrix
         def triton_embedding(tokens, weights): 
-            #triton_model.weight.data = weights.data#.detach().clone().requires_grad_(False)
             # this direct assignment is kinda weird since we're assigning a TritonTensor to what
             #  previously was a Parameter but it's prolly fine
             triton_model.weight = weights 
@@ -497,5 +496,29 @@ if __name__ == "__main__":
         )
         # gradients of (B, N) will be None
         # gradients of (V, D) are what we care about
+        
+    ### LayerNorm Module
+    if args.all or args.ln:
+        def inputs_list(input_shapes):
+            x = torch.randn(size=input_shapes[0], dtype=torch.float32, device=device) 
+            w = torch.ones(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
+            b = torch.zeros(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
+            return [x, w, b]
+        triton_model = nn.LayerNorm(D)
+        # because they both initialize randomly we need to set their weights to the same matrix
+        def triton_ln(x, w, b): 
+            # this direct assignment is kinda weird since we're assigning a TritonTensor to what
+            #  previously was a Parameter but it's prolly fine
+            triton_model.weight = w
+            triton_model.bias = b
+            return triton_model(x)
+        def torch_ln(x, w, b): 
+            return torch.nn.functional.layer_norm(x, normalized_shape=(x.shape[-1],), weight=w, bias=b)
+        test_operation(
+            f"LayerNorm: ({B}, {N}, {D}) -> ({B}, {N}, {D})",
+            triton_ln,
+            torch_ln,
+            inputs_list([(B, N, D), (D,), (D,)]),
+        )
 
         

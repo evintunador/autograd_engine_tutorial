@@ -168,14 +168,14 @@ class LayerNorm(Module):
             f"vectors (each size {BLOCK_SIZE_COLS * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
 
         # pre-allocate output
-        output = torch.empty_like(x, requires_grad=False)
+        output = torch.empty_like(x.data, requires_grad=False)
 
-        grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE_ROWS']))
-        vectorwise.layernorm_forward[grid](
+        grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE_ROWS']),)
+        modules.layernorm_forward[grid](
             x.data, self.weight.data, self.bias.data, output,
             x.data.stride(-2), x.data.stride(-1),
             self.weight.data.stride(0), self.bias.data.stride(0),
-            y.stride(-2), y.stride(-1),
+            output.stride(-2), output.stride(-1),
             preceeding_dims, D,
             self.eps,
             BLOCK_SIZE_COLS
@@ -190,7 +190,7 @@ class LayerNorm(Module):
 
         def _backward():
             """
-            vectorwise.layernorm_backward[grid](
+           modules.layernorm_backward[grid](
 
             )"""
             pass
