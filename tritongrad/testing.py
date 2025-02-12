@@ -62,8 +62,8 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        print(torch_input.grad, torch_input.shape)
-        print(triton_input.grad, triton_input.shape)
+        #print(torch_input.grad, torch_input.shape)
+        #print(triton_input.grad, triton_input.shape)
         torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
     print(f"✓ Backward pass matches")
     

@@ -116,7 +116,16 @@ class Embedding(Module):
         )
 
         def _backward():
-            pass
+            modules.embedding_backward[grid](
+                tokens.data,
+                self.weight.grad,
+                out.grad,
+                tokens.data.stride(0), tokens.data.stride(1),
+                self.weight.grad.stride(0), self.weight.grad.stride(1),
+                out.grad.stride(0), out.grad.stride(1), out.grad.stride(2),
+                N, self.embedding_dim, self.num_embeddings,
+                tokens.numel(), self.weight.grad.numel(), out.numel(),
+            )
         out._backward = _backward
 
         return out

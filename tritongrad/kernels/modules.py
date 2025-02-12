@@ -47,3 +47,44 @@ def embedding_forward(
     x_offsets = row_offsets[:, None] * x_N_stride + col_offsets[None, :] * x_D_stride
     x_mask = (row_offsets[:, None] < (x_num_elements // D)) & (col_offsets[None, :] < D)
     tl.store(x_ptr + x_offsets, e_block, mask=x_mask)
+
+@triton.autotune( 
+    [
+        triton.Config({"BLOCK_SIZE_ROWS": BLOCK_SIZE_ROWS, "BLOCK_SIZE_COLS": BLOCK_SIZE_COLS}, 
+                        num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_ROWS in [32, 64, 128]
+        for BLOCK_SIZE_COLS in [32, 64, 128]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["N", "D"],
+)
+@triton.jit
+def embedding_backward(
+    ids_ptr,        # ponter to tensor shape (B, N) that we can treat like (B * N)
+    dLde_ptr,          # ponter to tensor shape (V, D)
+    dLdx_ptr,       # ponter to tensor shape (B, N, D) that we can treat like (B * N, D)
+    ids_B_stride, ids_N_stride,
+    dLde_V_stride, dLde_D_stride,
+    dLdx_B_stride, dLdx_N_stride, dLdx_D_stride,
+    N, D, V,
+    ids_num_elements, dLde_num_elements, dLdx_num_elements,
+    BLOCK_SIZE_ROWS: tl.constexpr,
+    BLOCK_SIZE_COLS: tl.constexpr,
+):
+    pid_row = tl.program_id(0)
+    pid_col = tl.program_id(1)
+    row_offsets = pid_row * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)
+    col_offsets = pid_col * BLOCK_SIZE_COLS + tl.arange(0, BLOCK_SIZE_COLS)
+
+    ids_offsets = row_offsets * ids_N_stride
+    ids_mask = row_offsets < ids_num_elements
+    ids = tl.load(ids_ptr + ids_offsets, mask=ids_mask).to(tl.int32)
+
+    dLdx_offsets = row_offsets[:, None] * dLdx_N_stride + col_offsets[None, :] * dLdx_D_stride
+    dLdx_mask = (row_offsets[:, None] < (dLdx_num_elements // D)) & (col_offsets[None, :] < D)
+    dLdx_block = tl.load(dLdx_ptr + dLdx_offsets, mask=dLdx_mask)
+
+    dLde_offsets = ids[:, None] * dLde_V_stride + col_offsets[None, :] * dLde_D_stride
+    dLde_mask = (ids[:, None] < V) & (col_offsets[None, :] < D)
+    tl.atomic_add(dLde_ptr + dLde_offsets, dLdx_block, mask=dLde_mask)
