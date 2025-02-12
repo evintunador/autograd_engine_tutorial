@@ -3,10 +3,13 @@ import triton
 import triton.language as tl
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
+properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
+TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # each SM has a fixed amount of SRAM that it can access
+    # if one SM isn't using all its available SRAM then another can be spun up to use the remainder
 
 """
-all of our reduction ops will assume that the reduction is happening along the final vector in the tensor
-and that said vector fits into SRAM
+all of our vector-wise ops will assume that the calculation is happening along the final 
+vector in the tensor and that said vector fits into SRAM
 this should make our kernels far less flexible but also far more efficient
 """
 
@@ -154,3 +157,4 @@ def reduction_op_backward(
 
     # Store result
     tl.store(dLdx_ptr + x_offsets, dLdx, mask=x_mask)
+

@@ -6,6 +6,11 @@ import math
 from engine import TritonTensor, Parameter
 from kernels import modules
 
+DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
+properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
+TOTAL_SRAM_PER_SM = properties["max_shared_mem"] # each SM has a fixed amount of SRAM that it can access
+    # if one SM isn't using all its available SRAM then another can be spun up to use the remainder
+
 class Module: # just to make our syntax the same as pytorch's
     def __init__(self):
         self.training = True
@@ -136,3 +141,56 @@ class Embedding(Module):
     def parameters(self):
         return [self.weight]
 
+class LayerNorm(Module):
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, bias=True, device = None):
+        super().__init__()
+        self.normalized_shape = normalized_shape
+        self.eps = eps
+
+        self.weight = Parameter(
+            data = torch.ones((normalized_shape,), device=device),
+            device = device
+        ) if elementwise_affine else None
+        self.bias = Parameter(
+            torch.zeros((normalized_shape,), device=device),
+            device = device
+        ) if elementwise_affine and bias else None
+
+    def __call__(self, x: TritonTensor):
+        D = x.shape[-1]
+        assert D == normalized_shape
+        preceeding_dims = math.prod(x.shape[:-1])
+
+        # get tensor dimensions to ensure our parallelization scheme will work
+        row_len = triton.next_power_of_2(D)
+        # 4 for the 4 bytes in fp32
+        assert row_len * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {row_len * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        # pre-allocate output
+        output = torch.empty_like(x, requires_grad=False)
+
+        grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE']))
+        vectorwise.layernorm_forward[grid](
+
+        )
+
+        # wrap output in a triton tensor to add it to our graph
+        out = TritonTensor(
+            output, 
+            requires_grad=True,
+            _children = (x, self.weight, self.bias)
+        )
+
+        def _backward():
+            vectorwise.layernorm_backward[grid](
+
+            )
+        out.backward = _backward
+        return out
+
+    def parameters(self):
+        return [self.weight] + ([self.bias] if self.bias is not None else [])
+
+    def __repr__(self):
+        return f"nn.Linear\nWeight:\n{self.weight}" + f"\nBias:\n{self.bias}" if self.bias is not None else ""

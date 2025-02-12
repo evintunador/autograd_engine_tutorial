@@ -88,3 +88,44 @@ def embedding_backward(
     dLde_offsets = ids[:, None] * dLde_V_stride + col_offsets[None, :] * dLde_D_stride
     dLde_mask = (ids[:, None] < V) & (col_offsets[None, :] < D)
     tl.atomic_add(dLde_ptr + dLde_offsets, dLdx_block, mask=dLde_mask)
+
+
+
+@triton.autotune( 
+    [
+        triton.Config({"BLOCK_SIZE": BLOCK_SIZE}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE in [1, 2, 4, 8, 16, 32]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["D"],
+)
+@triton.jit
+def layernorm_forward(
+    x_ptr, w_ptr, b_ptr, y_ptr,
+    x_N_stride, x_D_stride,
+    w_D_stride, b_D_stride,
+    y_N_stride, y_D_stride,
+    rows, D,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    # TODO x offsets & mask
+    x = tl.load(x_ptr + ?, mask=?)
+
+    mean = tl.sum(x, axis=1, keep_dims=True) / D
+    err = x - mean
+    var = tl.sum(err * err, axis=1, keep_dims=True) / (D - 1)
+    sd = tl.sqrt(var + eps)
+    x_normalized = err / sd
+
+    # TODO w&b offsets & mask
+    w = tl.load(w_ptr + ?, mask=?)
+    b = tl.load(b_ptr + ?, mask=?)
+    x_shifted = x_normalized * w + b 
+
+    # TODO y offsets * mask
+    tl.store(y_ptr + ?, x_shifted, mask=?)
+
