@@ -109,22 +109,27 @@ def layernorm_forward(
     y_N_stride, y_D_stride,
     rows, D, 
     eps,
+    mean_ptr, rstd_ptr,
     BLOCK_SIZE_COLS: tl.constexpr,
     BLOCK_SIZE_ROWS: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    row_offsets = pid * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)[:, None]
-    col_offsets = tl.arange(0, BLOCK_SIZE_COLS)[None, :]
+    row_offsets = pid * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)
+    col_offsets = tl.arange(0, BLOCK_SIZE_COLS)
 
-    x_offsets = row_offsets * x_N_stride + col_offsets * x_D_stride
-    x_mask = (row_offsets < rows) & (col_offsets < D)
-    x = tl.load(x_ptr + x_offsets, mask=x_mask)#, other=0.0
-    # TODO do we put zeros in for the masked out values? calcs don't work then. let it stay empty?
-    mean = tl.sum(x, axis=1, keep_dims=True) / D
-    err = x - mean
-    var = tl.sum(err * err, axis=1, keep_dims=True) / (D - 1)
-    sd = tl.sqrt(var + eps)
-    x_normalized = err / sd
+    x_offsets = row_offsets[:, None] * x_N_stride + col_offsets[None, :] * x_D_stride
+    x_mask = (row_offsets[:, None] < rows) & (col_offsets[None, :] < D)
+    x = tl.load(x_ptr + x_offsets, mask=x_mask)
+    
+    mean = tl.sum(x, axis=1) / D
+    err = tl.where(col_offsets[None, :] < D, x - mean.expand_dims(1), 0.0)
+    var = tl.sum(err * err, axis=1) / (D - 1)
+    rstd = 1 / tl.sqrt(var + eps)
+    x_normalized = err * rstd.expand_dims(1)
+
+    # saving mean and rstd for use later in the backward pass
+    tl.store(mean_ptr + row_offsets, mean) # write BLOCK_SIZE_ROWS entries to memory
+    tl.store(rstd_ptr + row_offsets, rstd)
 
     tl.static_assert(w_D_stride == b_D_stride)
     wb_offsets = col_offsets * w_D_stride
@@ -133,7 +138,40 @@ def layernorm_forward(
     b = tl.load(b_ptr + wb_offsets, mask=wb_mask)
     x_shifted = x_normalized * w + b 
 
-    # TODO Y is guaranteed to have same strides as x right? so could we just reuse x_offsets?
-    y_offsets = row_offsets * y_N_stride + col_offsets * y_D_stride
+    # i'd like to assert that y_N_stride==x_N_stride and same with D here but you can
+    #  only use tl.static_assert() on tl.constexpr arguments, which these are not
+    y_offsets = row_offsets[:, None] * y_N_stride + col_offsets[None, :] * y_D_stride
     tl.store(y_ptr + y_offsets, x_shifted, mask=x_mask)
 
+
+@triton.autotune( 
+    [
+        triton.Config({"BLOCK_SIZE_ROWS": BLOCK_SIZE_ROWS}, 
+                        num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_ROWS in [1, 2, 4, 8, 16, 32]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["BLOCK_SIZE_COLS"],
+)
+@triton.jit
+def layernorm_backward_stage_1(
+    x_ptr, w_ptr, b_ptr, y_ptr,
+    dLdx_ptr, dLdw_ptr, dLdb_ptr, dLdy_ptr,
+    mean_ptr, rstd_ptr,
+    x_N_stride, x_D_stride,
+    w_N_stride, w_D_stride,
+    b_N_stride, b_D_stride,
+    y_N_stride, y_D_stride,
+    dLdx_N_stride, dLdx_D_stride,
+    dLdw_N_stride, dLdw_D_stride,
+    dLdb_N_stride, dLdb_D_stride,
+    dLdy_N_stride, dLdy_D_stride,
+    mean_N_stride, mean_D_stride,
+    rstd_N_stride, rstd_D_stride,
+    N, D,
+    BLOCK_SIZE_COLS: tl.constexpr,
+    BLOCK_SIZE_ROWS: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    

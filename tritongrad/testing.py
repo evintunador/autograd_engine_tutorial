@@ -42,8 +42,8 @@ def test_operation(op_name: str,
     triton_out = triton_fn(*triton_inputs)
     
     # Check forward pass
-    print(torch_out)
-    print(triton_out)
+    #print(torch_out)
+    #print(triton_out)
     torch.testing.assert_close(torch_out, triton_out.data, atol=atol, rtol=float("inf"))
     print(f"✓ Forward pass matches")
     

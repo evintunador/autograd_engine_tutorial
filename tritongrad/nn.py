@@ -146,6 +146,7 @@ class LayerNorm(Module):
         super().__init__()
         self.normalized_shape = normalized_shape
         self.eps = eps
+        self.device = torch.device(f'cuda:{torch.cuda.current_device()}') if device is None else device
 
         self.weight = Parameter(
             data = torch.ones((normalized_shape,), device=device),
@@ -169,6 +170,9 @@ class LayerNorm(Module):
 
         # pre-allocate output
         output = torch.empty_like(x.data, requires_grad=False)
+        # and pre-allocate mean & reciprocal standard deviation for use in the backward pass later
+        mean = torch.empty(x.shape[:-1], dtype=torch.float32, device=self.device, requires_grad=False)
+        rstd = torch.empty(x.shape[:-1], dtype=torch.float32, device=self.device, requires_grad=False)
 
         grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE_ROWS']),)
         modules.layernorm_forward[grid](
@@ -178,6 +182,7 @@ class LayerNorm(Module):
             output.stride(-2), output.stride(-1),
             preceeding_dims, D,
             self.eps,
+            mean, rstd,
             BLOCK_SIZE_COLS
         )
 
@@ -189,11 +194,18 @@ class LayerNorm(Module):
         )
 
         def _backward():
-            """
-           modules.layernorm_backward[grid](
-
-            )"""
-            pass
+            # allocating tensors to collect portions of the w & b gradients into
+            # this helps us avoid annoying & slow locks and/or atomic adds, but at the expense of some memory
+            dLdw_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
+            dLdb_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
+            # then we'll implement the kernel in two stages; the first does dLdx, dLdw_portions and dLdb_portions
+            modules.layernorm_backward_stage_1[grid](
+                #
+            )
+            # the second turns dLdw_portions and dLdb_portions into dLdw and dLdb respectively
+            modules.layernorm_backward_stage_2[grid](
+                #
+            )
         out.backward = _backward
         return out
 
