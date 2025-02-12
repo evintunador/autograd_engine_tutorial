@@ -91,7 +91,8 @@ if __name__ == "__main__":
     parser.add_argument('--unsqz', action='store_true', help='Run unsqueeze across arbitrary axes tests')
     parser.add_argument('--reshape', action='store_true', help='Run reshape tests')
     parser.add_argument('--idx', action='store_true', help='Run indexing tests')
-    parser.add_argument('--linear', action='store_true', help='Run linear layer tests')
+    parser.add_argument('--lin', action='store_true', help='Run linear layer tests')
+    parser.add_argument('--emb', action='store_true', help='Run embedding layer tests')
     
     args = parser.parse_args()
     
@@ -446,7 +447,7 @@ if __name__ == "__main__":
         )
         
     ### LINEAR LAYER
-    if args.all or args.linear:
+    if args.all or args.lin:
         def inputs_list(input_shapes):
             return [torch.randn(shape, dtype=torch.float32, device=device, requires_grad=True) 
                    for shape in input_shapes]
@@ -467,6 +468,24 @@ if __name__ == "__main__":
             atol=5e-2, # matmul gradient accumulation is VERY sensitive to flop error even at fp32
             rtol=1e5, # relative error is dummb bc when it's relative to 1e-6 everything looks big
             # or at least that's what i think is happening; lmk if you find an error i couldn't
+        )
+        
+    ### EMBEDDING LAYER
+    if args.all or args.emb:
+        def inputs_list(input_shapes):
+            return [torch.randint(0, V, size=shape, dtype=torch.int32, device=device)
+                    for shape in input_shapes] 
+        triton_model =  nn.Embedding(V, D)
+        torch_model = torch.nn.Embedding(V, D, device=device, dtype=torch.float32)
+        # because they both initialize randomly we need to set one to the other
+        torch_model.weight.data = triton_model.weight.data.detach().clone()
+        def triton_embedding(x): return triton_model(x)
+        def torch_embedding(x): return torch_model(x)
+        test_operation(
+            f"embedding layer: ({B}, {N}) & ({V}, {D}) -> ({B}, {N}, {D})",
+            triton_embedding,
+            torch_embedding,
+            inputs_list([(B, N)]),
         )
 
         

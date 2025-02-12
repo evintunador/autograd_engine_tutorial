@@ -6,40 +6,41 @@ DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
 @triton.autotune( 
     [
-        triton.Config({"BLOCK_SIZE_M": BLOCK_SIZE_M, "BLOCK_SIZE_N": BLOCK_SIZE_N}, 
+        triton.Config({"BLOCK_SIZE_ROWS": BLOCK_SIZE_ROWS, "BLOCK_SIZE_COLS": BLOCK_SIZE_COLS}, 
                         num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE_M in [32, 64, 128]
-        for BLOCK_SIZE_N in [32, 64, 128]
+        for BLOCK_SIZE_ROWS in [32, 64, 128]
+        for BLOCK_SIZE_COLS in [32, 64, 128]
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4, 8]
     ],
-    key=["embedding_dimension?"], # TODO
+    key=["N", "D"],
 )
 @triton.jit
-def embedder_forward(
-    ids_ptr,                        # shape (B, N) that we can treat like (B * N)
-    E_ptr,                          # shape (V, D)
-    x_ptr,                          # shape (B, N, D)
-    embed_dim_stride,
-    ids_num_elements, E_num_elements, x_num_elements,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+def embedding_forward(
+    ids_ptr,    # ponter to tensor shape (B, N) that we can treat like (B * N)
+    e_ptr,      # ponter to tensor shape (V, D)
+    x_ptr,      # ponter to tensor shape (B, N, D) that we can treat like (B * N, D)
+    ids_B_stride, ids_N_stride,
+    e_V_stride, e_D_stride,
+    x_B_stride, x_N_stride, x_D_stride,
+    N, D, V,
+    x_num_elements,
+    BLOCK_SIZE_ROWS: tl.constexpr,
+    BLOCK_SIZE_COLS: tl.constexpr,
 ):
-    tl.assume(BLOCK_SIZE_N >= embed_dim_stride)
+    pid_row = tl.program_id(0)
+    pid_col = tl.program_id(1)
+    row_offsets = pid_row * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)
+    col_offsets = pid_col * BLOCK_SIZE_COLS + tl.arange(0, BLOCK_SIZE_COLS)
 
-    pid = tl.program_id(0)
-    
-    col_offsets = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    row_offsets = tl.arange(0, BLOCK_SIZE_N)
+    ids_offsets = row_offsets * ids_N_stride
+    ids_mask = row_offsets < ids_num_elements
+    ids = tl.load(ids_ptr + ids_offsets, mask=ids_mask)
 
-    ids_mask = col_offsets < ids_num_elements
-    ids = tl.load(ids_ptr + col_offsets, mask=ids_mask, padding_option="")
+    e_offsets = ids[:, None] * e_V_stride + col_offsets[None, :] * e_D_stride
+    e_mask = (ids[:, None] < V) & (col_offsets[None, :] < D)
+    e_block = tl.load(e_ptr + e_offsets, mask=e_mask)
 
-    E_offsets = ids[:, None] * embed_dim_stride + row_offsets[None, :]
-    E_mask = col_offsets[:, None] < 
-    E_block = tl.load(E_ptr + E_offsets)
-
-    x_offsets = pid * BLOCK_SIZE_M * BLOCK_SIZE_N \
-                + col_offsets[:, None] * BLOCK_SIZE_N \
-                + row_offsets[None, :]
-    tl.store(x_ptr + x_offsets, E_block)
+    x_offsets = row_offsets[:, None] * x_N_stride + col_offsets[None, :] * x_D_stride
+    x_mask = (row_offsets[:, None] < (x_num_elements // D)) & (col_offsets[None, :] < D)
+    tl.store(x_ptr + x_offsets, e_block, mask=x_mask)

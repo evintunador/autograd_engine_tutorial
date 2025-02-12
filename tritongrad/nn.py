@@ -4,7 +4,7 @@ import triton.language as tl
 import math
 
 from engine import TritonTensor, Parameter
-#from kernels import ?
+from kernels import modules
 
 class Module: # just to make our syntax the same as pytorch's
     def __init__(self):
@@ -39,7 +39,7 @@ class Linear(Module):
     def __init__(self, in_features: int, out_features: int, bias = True, device = None):
         super().__init__()
         self.weight = Parameter(
-            data = torch.randn(size=(in_features, out_features)) * math.sqrt(1/in_features),
+            data = torch.randn((in_features, out_features)) * math.sqrt(1/in_features),
             device = device
         )
         if bias: 
@@ -63,3 +63,66 @@ class Linear(Module):
 
     def __repr__(self):
         return f"nn.Linear\nWeight:\n{self.weight}" + f"\nBias:\n{self.bias}" if self.bias is not None else ""
+
+class Embedding(Module):
+    def __init__(
+        self, 
+        num_embeddings: int, 
+        embedding_dim: int, 
+        #padding_idx: int = None,
+        device = None
+    ):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+
+        self.weight = Parameter(
+            data = torch.randn((num_embeddings, embedding_dim)),
+            device = device
+        )
+
+    def __call__(self, tokens):
+        B, N = tokens.shape
+        # TODO assert vals in tokens are all below num_embeddings
+        
+        # pre-allocate output
+        output = torch.empty(
+            (B, D, self.embedding_dim), 
+            dtype=self.weight.dtype, 
+            device=self.weight.device, 
+            requires_grad=True
+        )
+
+        grid = lambda meta: (
+            triton.cdiv(B*N, meta['BLOCK_SIZE_ROWS']), 
+            triton.cdiv(D, meta['BLOCK_SIZE_COLS'])
+            )
+        modules.embedding_forward[grid](
+            tokens.data,
+            self.weight.data,
+            output,
+            tokens.data.stride(0), tokens.data.stride(1),
+            self.weight.data.stride(0), self.weight.data.stride(1),
+            output.stride(0), output.stride(1), output.stride(2),
+            N, D, self.num_embeddings,
+            output.numel(),
+        )
+
+        # Wrap output in TritonTensor with autograd information
+        out = TritonTensor(
+            output, 
+            requires_grad = True, # since self.weight always requires it 
+            _children = (tokens, self.weight)
+        )
+
+        def _backward():
+            pass
+        out._backward = _backward
+
+        return out
+
+    def __repr__(self):
+        return f"Emedding:\n({self.weight.data})"
+
+    def parameters(self):
+        return [self.weight]
