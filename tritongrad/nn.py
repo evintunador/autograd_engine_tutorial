@@ -156,6 +156,15 @@ class LayerNorm(Module):
             torch.zeros((normalized_shape,), device=device),
             device = device
         ) if elementwise_affine and bias else None
+        """
+        TODO rn the thing prolly breaks if you do elementwise_affine=False and/or bias=False.
+        to fix this you'd set it so that instead of initializing self.weight and self.bias to None,
+         they'd be TritonTensors with requires_grad = False but still the same 1's and 0's values.
+        that way we can still use the same fused kernel but not have it mess anything up in the graph
+         which yes is unnecessarily slow but i'm fs too lazy to write a whole separate kernel without 
+         the fused weights and biases when i know for a fact i'm never gonna use it.
+        so feel free to do that if you want
+        """
 
     def __call__(self, x: TritonTensor):
         D = x.shape[-1]

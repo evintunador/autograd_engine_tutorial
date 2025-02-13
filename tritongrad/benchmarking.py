@@ -309,7 +309,7 @@ class _matmul(torch.autograd.Function):
         assert a.shape[-2] == b.shape[-1]
         if b.ndim > 2:
             assert a.shape[:-2] == b.shape[:-2]
-        assert a.data.is_contiguous()
+        assert a.is_contiguous()
 
         # getting the total number of entries of each of our inputs
         n_elements = a.numel()
@@ -432,7 +432,7 @@ class _reduction(torch.autograd.Function):
         only supports reduction along the final dimension
         """
         # check constraints
-        assert x.data.is_contiguous()
+        assert x.is_contiguous()
 
         # allocates output
         y = torch.empty(x.shape[:-1], device=x.device, dtype=x.dtype)
@@ -685,6 +685,145 @@ def benchmark_embedding(vocab_size, provider, op, mode, device=DEVICE):
     return gb / (ms * 1e-3)
 
 
+########################################################################################
+########################### LayerNorm Module ############################################
+########################################################################################
+
+class _layernorm(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x, weight, bias): 
+        """
+        implementation of LayerNorm module
+        """
+        B, N, D = x.shape
+        preceeding_dims = B*N
+        assert x.device == weight.device and x.device == bias.device
+
+        # get tensor dimensions to ensure our parallelization scheme will work
+        BLOCK_SIZE_COLS = triton.next_power_of_2(D)
+        # 4 for the 4 bytes in fp32
+        assert BLOCK_SIZE_COLS * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_COLS * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        # allocates output
+        y = torch.empty_like(x)
+        # and pre-allocate mean & reciprocal standard deviation for use in the backward pass later
+        mean = torch.empty(preceeding_dims, dtype=torch.float32, device=x.device, requires_grad=False)
+        rstd = torch.empty(preceeding_dims, dtype=torch.float32, device=x.device, requires_grad=False)
+
+        grid = lambda meta: (triton.cdiv(B * N, meta['BLOCK_SIZE_ROWS']),)
+        modules.layernorm_forward[grid](
+            x, weight, bias, y,
+            x.stride(-2), x.stride(-1),
+            weight.stride(0), bias.stride(0),
+            y.stride(-2), y.stride(-1),
+            preceeding_dims, D,
+            1e-5,
+            mean, rstd,
+            BLOCK_SIZE_COLS
+        )
+
+        ctx.save_for_backward(x, weight, bias, mean, rstd)
+        ctx.grid = grid
+        ctx.BLOCK_SIZE_COLS = BLOCK_SIZE_COLS
+        ctx.preceeding_dims, ctx.D = preceeding_dims, D
+        return y
+
+    @staticmethod
+    def backward(ctx, dLdy):
+        x, weight, bias, mean, rstd = ctx.saved_tensors
+        grid = ctx.grid
+        BLOCK_SIZE_COLS = ctx.BLOCK_SIZE_COLS
+        preceeding_dims, D = ctx.preceeding_dims, ctx.D
+        dLdx = torch.empty_like(dLdy)
+        dLdw = torch.empty((D,), device=dLdy.device, dtype=dLdy.dtype)
+        dLdb = torch.empty((D,), device=dLdy.device, dtype=dLdy.dtype)
+        
+        modules.layernorm_backward[grid](
+            x, weight, bias,
+            dLdx, dLdy,
+            dLdw, dLdb,
+            mean, rstd,
+            x.stride(-2), x.stride(-1),
+            weight.stride(-1),
+            bias.stride(-1),
+            dLdx.stride(-2), dLdx.stride(-1),
+            dLdy.stride(-2), dLdy.stride(-1),
+            dLdw.stride(-1),
+            dLdb.stride(-1),
+            mean.stride(-1),
+            rstd.stride(-1),
+            preceeding_dims, D,
+            BLOCK_SIZE_COLS
+        )
+
+        return dLdx, dLdw, dLdb
+
+layernorm_fn = _layernorm.apply
+
+# Define the operations list based on input args
+def get_layernorm_args(args):
+    ops = []
+    if args.all or args.ln:
+        ops.append("ln")
+    return ops
+
+# First define an empty list that will be populated before the decorator is used
+layernorm_configs = []
+def generate_layernorm_configs(ops):
+    configs = []
+    for op in ops:
+        for mode in ["fwd", "bwd"]:
+            configs.append(
+                triton.testing.Benchmark(
+                    x_names=['D'],
+                    x_vals=[256 * i for i in range(1, 12, 1)],
+                    line_arg='provider',
+                    line_vals=['torch', 'triton'],
+                    line_names=['PyTorch', 'Triton'],
+                    styles=[('blue', '-'), ('red', '-')],
+                    ylabel='GB/s',
+                    xlabel="embedding dimension getting normalized",
+                    plot_name=f'{op}_{mode}',
+                    args={"op": op, "mode": mode,},
+                ))
+    return configs
+
+@triton.testing.perf_report(layernorm_configs)
+def benchmark_layernorm(D, provider, op, mode, device=DEVICE):
+    """
+    Benchmark Triton layernorm kernels against PyTorch.
+    """
+    # Generate input data
+    B, N = 32, 2048
+    x = torch.randn((B, N, D), dtype=torch.float32, device=device, requires_grad=True) * 0.02
+    weight = torch.randn((D,), dtype=torch.float32, device=device, requires_grad=True) * 0.02
+    bias = torch.randn((D,), dtype=torch.float32, device=device, requires_grad=True) * 0.02
+    
+    # Select implementation
+    if provider == 'triton':
+        fn = lambda: layernorm_fn(x, weight, bias) 
+    else: 
+        fn = lambda: torch.nn.functional.layer_norm(
+            x, 
+            normalized_shape=(D,), 
+            weight=weight, bias=bias
+        )
+    if mode == "bwd":
+        O = fn()
+        dO = torch.randn_like(O)
+        fn = lambda: O.backward(dO, retain_graph=True)
+    
+    # Benchmark
+    if mode == "fwd":
+        gb = ((2 * B*N*D) + (2 * B*N) + (2 * D)) * 4 * 1e-9
+    else:
+        gb = ((3 * B*N*D) + (2 * B*N) + (3 * D)) * 4 * 1e-9
+    ms = triton.testing.do_bench(fn)
+    return gb / (ms * 1e-3)
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -703,6 +842,7 @@ if __name__ == "__main__":
     parser.add_argument('--var', action='store_true', help='Run variance benchmarks')
     parser.add_argument('--std', action='store_true', help='Run standard deviation benchmarks')
     parser.add_argument('--emb', action='store_true', help='Run embedding module benchmarks')
+    parser.add_argument('--ln', action='store_true', help='Run LayerNorm module benchmarks')
     
     args = parser.parse_args()
     
@@ -742,3 +882,9 @@ if __name__ == "__main__":
         print("\nRunning embedding module benchmarks...")
         embedding_configs.extend(generate_embedding_configs(embedding_args))
         benchmark_embedding.run(print_data=True, save_path='./benchmarks/')
+
+    layernorm_args = get_layernorm_args(args)
+    if layernorm_args:
+        print("\nRunning LayerNorm module benchmarks...")
+        layernorm_configs.extend(generate_layernorm_configs(layernorm_args))
+        benchmark_layernorm.run(print_data=True, save_path='./benchmarks/')
