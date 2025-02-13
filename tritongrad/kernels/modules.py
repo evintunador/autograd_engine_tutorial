@@ -123,7 +123,8 @@ def layernorm_forward(
     
     mean = tl.sum(x, axis=1) / D
     err = tl.where(col_offsets[None, :] < D, x - mean.expand_dims(1), 0.0)
-    var = tl.sum(err * err, axis=1) / (D - 1)
+    var = tl.sum(err * err, axis=1) / D 
+        # LayerNorm uses biased variance (as opposed to D - 1) since we're not sampling from a population
     rstd = 1 / tl.sqrt(var + eps)
     x_normalized = err * rstd.expand_dims(1)
 
