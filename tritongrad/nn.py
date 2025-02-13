@@ -203,17 +203,7 @@ class LayerNorm(Module):
         )
 
         def _backward():
-            # allocating tensors to collect portions of the w & b gradients into
-            # this helps us avoid annoying & slow locks and/or atomic adds, but at the expense of some memory
-            #dLdw_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
-            #dLdb_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
-                # notice grid[0] means each pid will accumulate into its own row
-            # we'll implement the kernel in two stages; the first does dLdx, dLdw_portions and dLdb_portions
-            # the second turns dLdw_portions and dLdb_portions into dLdw and dLdb respectively
-            #modules.layernorm_backward_stage_2[grid](
-                #
-            #)
-
+            # this module assumes everything needs a gradient, we're not gonna bother giving the option
             modules.layernorm_backward[grid](
                 x.data, self.weight.data, self.bias.data,
                 x.grad, out.grad,
