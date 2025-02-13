@@ -155,23 +155,71 @@ def layernorm_forward(
     key=["BLOCK_SIZE_COLS"],
 )
 @triton.jit
-def layernorm_backward_stage_1(
-    x_ptr, w_ptr, b_ptr, y_ptr,
-    dLdx_ptr, dLdw_ptr, dLdb_ptr, dLdy_ptr,
+def layernorm_backward(
+    x_ptr, w_ptr, b_ptr, 
+    dLdx_ptr, dLdy_ptr,
+    dLdw_ptr, dLdb_ptr, 
     mean_ptr, rstd_ptr,
     x_N_stride, x_D_stride,
-    w_N_stride, w_D_stride,
-    b_N_stride, b_D_stride,
-    y_N_stride, y_D_stride,
+    w_D_stride,
+    b_D_stride,
     dLdx_N_stride, dLdx_D_stride,
-    dLdw_N_stride, dLdw_D_stride,
-    dLdb_N_stride, dLdb_D_stride,
     dLdy_N_stride, dLdy_D_stride,
-    mean_N_stride, mean_D_stride,
-    rstd_N_stride, rstd_D_stride,
+    dLdw_D_stride,
+    dLdb_D_stride,
+    mean_N_stride,
+    rstd_N_stride,
     N, D,
     BLOCK_SIZE_COLS: tl.constexpr,
     BLOCK_SIZE_ROWS: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    
+    row_offsets = pid * BLOCK_SIZE_ROWS + tl.arange(0, BLOCK_SIZE_ROWS)
+    rows_mask = row_offsets < N
+    col_offsets = tl.arange(0, BLOCK_SIZE_COLS)
+    cols_mask = col_offsets < D
+
+    # Load data to SRAM
+    x_offsets = row_offsets[:, None] * x_N_stride + col_offsets[None, :] * x_D_stride
+    x_mask = rows_mask[:, None] & cols_mask[None, :]
+    x = tl.load(x_ptr + x_offsets, mask = x_mask) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
+    dLdy_offsets = row_offsets[:, None] * dLdy_N_stride + col_offsets[None, :] * dLdy_D_stride
+    dLdy_mask = rows_mask[:, None] & cols_mask[None, :]
+    dLdy = tl.load(dLdy_ptr + dLdy_offsets, mask = dLdy_mask) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
+    w = tl.load(w_ptr + col_offsets * w_D_stride, mask = cols_mask) # shape (BLOCK_SIZE_COLS)
+    mean = tl.load(mean_ptr + row_offsets[:, None] * mean_N_stride, mask = rows_mask[:, None])
+    rstd = tl.load(rstd_ptr + row_offsets[:, None] * rstd_N_stride, mask = rows_mask[:, None])
+        # shape (BLOCK_SIZE_ROWS, 1)
+
+    """
+    LayerNorm is
+        y = xhat * w + b
+    where
+        xhat = (x - mean) * rstd        <- aka normalized x
+        mean = sum(x) / D
+        rstd = 1 / sqrt(var + eps)
+        var = sum((x - mean) ** 2) / (D - 1)
+
+    So to get the derivative dLdx given the upstream gradient dLdy, 
+    we first do
+        dLdxhat = dLdy * dydxhat = dLdy * w
+    then use a rearrangement of the raw chain-rule form to get
+        dLdx = rstd * (dLdxhat - rowMean(dLdxhat) - xhat * rowMean(dLdxhat * xhat))
+    """
+    xhat = tl.where(cols_mask, (x - mean) * rstd, 0.) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
+    dLdxhat = tl.where(cols_mask, dLdy * w, 0.) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
+    # c1 and c2 are just intermediary labels; no real meaning
+    c1 = tl.sum(xhat * dLdxhat, axis=1) / D # shape (BLOCK_SIZE_ROW)
+    c2 = tl.sum(dLdxhat, axis=1) / D # shape (BLOCK_SIZE_ROW)
+    dLdx = (dLdxhat - (xhat * c1[:, None] + c2[:, None])) * rstd # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
+
+    # assuming x offsets & mask will work for dLdx
+    tl.store(dLdx_ptr + x_offsets, dLdx, mask = x_mask)
+
+    # accumulate partial sums for dLdw and dLdb
+    dLdw_portion = tl.sum(dLdy * xhat, axis=0) # shape (BLOCK_SIZE_COLS)
+    dLdb_portion = tl.sum(dLdy, axis=0) # shape (BLOCK_SIZE_COLS)
+
+    tl.atomic_add(dLdw_ptr + col_offsets * dLdw_D_stride, dLdw_portion, mask = cols_mask)
+    tl.atomic_add(dLdb_ptr + col_offsets * dLdb_D_stride, dLdb_portion, mask = cols_mask)
+

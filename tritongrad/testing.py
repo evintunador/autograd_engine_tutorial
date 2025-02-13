@@ -500,7 +500,7 @@ if __name__ == "__main__":
     ### LayerNorm Module
     if args.all or args.ln:
         def inputs_list(input_shapes):
-            x = torch.randn(size=input_shapes[0], dtype=torch.float32, device=device) 
+            x = torch.randn(size=input_shapes[0], dtype=torch.float32, device=device, requires_grad=True) 
             w = torch.ones(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
             b = torch.zeros(size=input_shapes[1], dtype=torch.float32, device=device, requires_grad=True)
             return [x, w, b]

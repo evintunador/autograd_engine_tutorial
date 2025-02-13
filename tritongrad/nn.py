@@ -171,8 +171,8 @@ class LayerNorm(Module):
         # pre-allocate output
         output = torch.empty_like(x.data, requires_grad=False)
         # and pre-allocate mean & reciprocal standard deviation for use in the backward pass later
-        mean = torch.empty(x.shape[:-1], dtype=torch.float32, device=self.device, requires_grad=False)
-        rstd = torch.empty(x.shape[:-1], dtype=torch.float32, device=self.device, requires_grad=False)
+        mean = torch.empty(math.prod(x.shape[:-1]), dtype=torch.float32, device=self.device, requires_grad=False)
+        rstd = torch.empty(math.prod(x.shape[:-1]), dtype=torch.float32, device=self.device, requires_grad=False)
 
         grid = lambda meta: (triton.cdiv(preceeding_dims, meta['BLOCK_SIZE_ROWS']),)
         modules.layernorm_forward[grid](
@@ -196,17 +196,34 @@ class LayerNorm(Module):
         def _backward():
             # allocating tensors to collect portions of the w & b gradients into
             # this helps us avoid annoying & slow locks and/or atomic adds, but at the expense of some memory
-            dLdw_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
-            dLdb_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
-            # then we'll implement the kernel in two stages; the first does dLdx, dLdw_portions and dLdb_portions
-            modules.layernorm_backward_stage_1[grid](
-                #
-            )
+            #dLdw_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
+            #dLdb_portions = torch.empty((grid[0], D), dtype=torch.float32, device=self.device, requires_grad=False)
+                # notice grid[0] means each pid will accumulate into its own row
+            # we'll implement the kernel in two stages; the first does dLdx, dLdw_portions and dLdb_portions
             # the second turns dLdw_portions and dLdb_portions into dLdw and dLdb respectively
-            modules.layernorm_backward_stage_2[grid](
+            #modules.layernorm_backward_stage_2[grid](
                 #
+            #)
+
+            modules.layernorm_backward[grid](
+                x.data, self.weight.data, self.bias.data,
+                x.grad, out.grad,
+                self.weight.grad, self.bias.grad,
+                mean, rstd,
+                x.data.stride(-2), x.data.stride(-1),
+                self.weight.data.stride(-1),
+                self.bias.data.stride(-1),
+                x.grad.stride(-2), x.grad.stride(-1),
+                out.grad.stride(-2), out.grad.stride(-1),
+                self.weight.grad.stride(-1),
+                self.bias.grad.stride(-1),
+                mean.stride(-1),
+                rstd.stride(-1),
+                preceeding_dims, D,
+                BLOCK_SIZE_COLS
             )
-        out.backward = _backward
+        out._backward = _backward
+
         return out
 
     def parameters(self):
