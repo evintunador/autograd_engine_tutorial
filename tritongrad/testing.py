@@ -1,6 +1,6 @@
 from typing import Union, Tuple, Optional
 import numpy as np
-from math import prod
+import math
 
 import torch
 import triton
@@ -96,6 +96,7 @@ if __name__ == "__main__":
     parser.add_argument('--lin', action='store_true', help='Run linear layer tests')
     parser.add_argument('--emb', action='store_true', help='Run embedding layer tests')
     parser.add_argument('--ln', action='store_true', help='Run LayerNorm module tests')
+    parser.add_argument('--flash', action='store_true', help='Run Flash Attention tests')
     
     args = parser.parse_args()
     
@@ -104,7 +105,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D, V = 4, 1024, 8, 384, 4096
+    B, N, H, D, V = 4, 512, 8, 256, 4096
         
     ### EXPONENTIATION
     if args.all or args.exp:
@@ -519,6 +520,33 @@ if __name__ == "__main__":
             triton_ln,
             torch_ln,
             inputs_list([(B, N, D), (D,), (D,)]),
+        )
+        
+    ### Flash Attention
+    if args.all or args.flash:
+        Dh = 128
+        def inputs_list(input_shapes):
+            return [torch.randn(size=shape, dtype=torch.float32, device=device, requires_grad=True) * 0.02
+                    for shape in input_shapes]
+        def triton_flash(q, k, v): 
+            return nn.FlashAttention()(q, k, v, is_causal=True, scale=math.sqrt(Dh))
+        def torch_flash(q, k, v): 
+            return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=math.sqrt(Dh))
+        test_operation(
+            f"causal flash attention",
+            triton_flash,
+            torch_flash,
+            inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
+        )
+        def triton_flash(q, k, v): 
+            return nn.FlashAttention()(q, k, v, is_causal=False, scale=math.sqrt(Dh))
+        def torch_flash(q, k, v): 
+            return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False, scale=math.sqrt(Dh))
+        test_operation(
+            f"non-causal flash attention",
+            triton_flash,
+            torch_flash,
+            inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
         )
 
         

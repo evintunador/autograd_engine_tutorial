@@ -226,7 +226,84 @@ class LayerNorm(Module):
         return out
 
     def parameters(self):
-        return [self.weight] + ([self.bias] if self.bias is not None else [])
+        return [self.weight] \
+                + ([self.bias] if self.bias is not None else [])
 
     def __repr__(self):
-        return f"nn.Linear\nWeight:\n{self.weight}" + f"\nBias:\n{self.bias}" if self.bias is not None else ""
+        return f"nn.LayerNorm\nWeight:\n{self.weight}" + f"\nBias:\n{self.bias}" if self.bias is not None else ""
+
+
+class FlashAttention(Module):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(
+        self,
+        Q: TritonTensor,
+        K: TritonTensor,
+        V: TritonTensor,
+        is_causal: bool = False,
+        scale: float = None,
+    ):
+        assert Q.shape == K.shape == V.shape
+        assert Q.shape[-1] in (128, 256), \
+            f'flash attention only supports head dimension of 128 or 256 but got {q.shape[-1]}'
+            # the kernel actually isn't this limited but too much larger and it would break
+        B, H, N, D = Q.shape
+
+        # pre-allocate output tensor
+        O = torch.empty_like(Q.data) # output tensor will be pre head concatenation and mixing
+        # and pre-allocate logsumexp
+        M = torch.empty((B, H, N), device=Q.device, dtype=torch.float32)
+
+        grid = lambda args: (
+            triton.cdiv(N, args["BLOCK_SIZE_Q"]), # primary parallelizatoin is across sequence length
+            B * H, # parallelize across the dimensions that don't matter
+            1, # include the 1 for clarity of total dims even though it's not strictly necessary
+        )
+        modules._attn_fwd[grid](
+            Q_ptr=Q.data, K_ptr=K.data, V_ptr=V.data,
+            softmax_scale=scale,
+            M_ptr=M,
+            O_ptr=O,
+            stride_Q_batch=Q.data.stride(0),
+            stride_Q_head=Q.data.stride(1),
+            stride_Q_seq=Q.data.stride(2),
+            stride_Q_dim=Q.data.stride(3),
+            stride_K_batch=K.data.stride(0),
+            stride_K_head=K.data.stride(1),
+            stride_K_seq=K.data.stride(2),
+            stride_K_dim=K.data.stride(3),
+            stride_V_batch=V.data.stride(0),
+            stride_V_head=V.data.stride(1),
+            stride_V_seq=V.data.stride(2),
+            stride_V_dim=V.data.stride(3),
+            stride_O_batch=O.stride(0),
+            stride_O_head=O.stride(1),
+            stride_O_seq=O.stride(2),
+            stride_O_dim=O.stride(3),
+            BATCH_SIZE=B,
+            NUM_HEADS=H,
+            SEQ_LEN=N,
+            HEAD_DIM=D,
+            CAUSAL=is_causal,
+        )
+
+        # wrap output in a triton tensor to add it to our graph
+        out = TritonTensor(
+            O, 
+            requires_grad= Q.requires_grad or K.requires_grad or V.requires_grad,
+            _children = (Q, K, V)
+        )
+
+        def _backward():
+            pass
+        out._backward = _backward
+
+        return out
+
+    def parameters(self):
+        return []
+
+    def __repr__(self):
+        return f"nn.FlashAttention Module"
