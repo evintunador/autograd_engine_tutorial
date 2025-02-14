@@ -301,29 +301,29 @@ class FlashAttention(Module):
             assert out.grad.is_contiguous()
             assert Q.data.stride() == K.data.stride() == V.data.stride() == out.data.stride() == out.grad.stride()
             
-            PRE_BLOCK = 128 # TODO autotune this instead of setting it
-            BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32 # TODO make these autotuned
-            BLK_SLICE_FACTOR = 2 # TODO what is slice factor?
-            rln2 = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
-            # pre-scale the keys in a format including RCP_LN2 to take advantage of exponential arithmetic we'll see later
-            arg_K = K * (scale * rln2)
-            
+            Delta = torch.empty_like(M)
+            PRE_BLOCK_SIZE_ROW = 128 # TODO autotune this instead of setting it
             # TODO i think this lets us ignore masking in the preprocessing kernel? kind of a dumb requirement
-            assert N % PRE_BLOCK == 0
+            assert N % PRE_BLOCK_SIZE_ROW == 0
             # the ordering of your grid matters because it determines which programs end up sharing the same SRAM
-            pre_grid = (N // PRE_BLOCK, B * H)
+            pre_grid = (N // PRE_BLOCK_SIZE_ROW, B * H)
                 # in this case, we want the parallelizations along the N dimension to be near each other so they can
                 #  share data, while parallelization across batches & heads don't necessitate any sharing
-            Delta = torch.empty_like(M)
             modules.attn_bwd_preprocess[pre_grid](
                 out.data. out.grad,
                 Delta,
                 B, H, N,
-                BLOCK_SIZE_ROW = PRE_BLOCK,
+                BLOCK_SIZE_ROW = PRE_BLOCK_SIZE_ROW,
                 HEAD_DIM = D,
             )
 
-            grid = (N // BLOCK_N1, 1, B * H)
+            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 32, 128 # TODO make these autotuned
+            BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2 = 128, 32 
+            BLK_SLICE_FACTOR = 2 # TODO what is slice factor?
+            rln2 = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
+            # pre-scale the keys in a format including RCP_LN2 to take advantage of exponential arithmetic we'll see later
+            arg_K = K * (scale * rln2) # TODO integrate this pre-scaling into the kernel to avoid the 2 mem accesses
+            grid = (N // BLOCK_SIZE_ROW_1, B * H)
             modules.attn_bwd[grid](
                 Q, arg_K, V,
                 scale,
@@ -332,8 +332,8 @@ class FlashAttention(Module):
                 Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
                 H, N,
                 D=D,
-                BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1, # for the first sub-kernel to get called
-                BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2, # for the second sub-kernel to get called
+                BLOCK_SIZE_ROW_1=BLOCK_SIZE_ROW_1, BLOCK_NSIZE_COL1=BLOCK_NSIZE_COL1, # for the first sub-kernel 
+                BLOCK_SIZE_ROW_2=BLOCK_SIZE_ROW_2, BLOCK_NSIZE_COL2=BLOCK_NSIZE_COL2, # for the second sub-kernel
                 BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
             )
         out._backward = _backward

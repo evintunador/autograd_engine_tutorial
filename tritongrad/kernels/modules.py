@@ -575,8 +575,8 @@ def attn_backward_preprocess(
     HEAD_DIM: tl.constexpr,
 ):
     """the job of this kernel is to pre-compute Delta since Delta is used by both of the following two kernels"""
-    index_batch_head = tl.program_id(0) # BATCH_SIZE * NUM_HEADS number of pids
-    row = tl.program_id(1) # N / BLOCK_SIZE_ROW number of pids
+    index_batch_head = tl.program_id(1) # BATCH_SIZE * NUM_HEADS number of pids
+    row = tl.program_id(0) # N / BLOCK_SIZE_ROW number of pids
 
     row_offsets = row * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW)
     col_offsets = tl.arange(0, HEAD_DIM)
@@ -600,18 +600,122 @@ def attn_backward_preprocess(
 
 
 @triton.jit
+def _attn_backward_KV(
+    K_block, V_block,               # shape (BLOCK_SIZE_COL, D)
+    dLdK_block, dLdV_block,         # shape (BLOCK_SIZE_COL, D)
+    Q_ptr, dLdO_ptr
+    M_ptr, Delta_ptr,
+    stride_N, stride_D,
+    H, N, D: tl.constexpr,
+    BLOCK_SIZE_ROW: tl.constexpr,   # no more _1 because this sub-kernel is the _1
+    BLOCK_SIZE_COL: tl.constexpr, 
+    start_ROW, start_COL, 
+    num_steps,
+    MASK: tl.constexpr
+):
+    """
+    this kernel will be looking at a specific chunk of K & V and iterating through
+    rows of Q to calculate that chunk of dLdK and dLdV
+    """
+    # BLOCK_SIZE_COL must be a multiple of BLOCK_SIZE_ROW or the code won't work
+        # TODO why tho?
+    tl.static_assert(BLOCK_SIZE_COL % BLOCK_SIZE_ROW == 0)
+    
+    offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
+    offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
+    offsets_D = tl.arange(0, D)
+    Q_T_ptrs = Q_T_ptr + offsets_D[:, None] * stride_D + offsets_ROW[None, :] * stride_N
+    dLdO_ptrs = dLdO_ptr + offs_ROW[:, None] * stride_N + offsets_D[None, :] * stride_D
+
+    curr_ROW = start_ROW
+    step_ROW = BLOCK_SIZE_ROW
+    for block_idx in range(num_steps):
+        # we transpose Q while loading it
+        Q_T_block = tl.load(Q_ptrs) # shape (D, BLOCK_SIZE_ROW)
+
+        # we load M before computing S to reduce pipeline stall,
+        # meaning the Triton compiler can have an easier time doing the loading of M
+        # and the dot product of K and QT simultaneously
+        offsets_ROW = curr_ROW + tl.arange(0, BLOCK_SIZE_ROW)
+            # TODO couldn't i just do offsets_ROW += step_ROW? 
+        M_block = tl.load(M_ptr + offs_ROW) # shape (BLOCK_SIZE_ROW)
+
+        # calculate transpose of S and then P matrices
+        S_T = tl.dot(K_block, Q_T_block) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+        P_T = tl.exp2(S_T - M[None, :]) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+
+        if MASK:
+            mask = (offsets_COL[None, :] >= offsets_ROW[:, None])
+            P_T = tl.where(mask, P_T, 0.)
+
+        # compute dLdV
+        dLdO_block = tl.load(dLdO_ptrs) # shape (BLOCK_SIZE_ROW, D)
+        dLdV_block += tl.dot(P_T.to(tl.float16), dLdO) # shape (BLOCK_SIZE_COL, D)
+
+        # Delta is pre-divided by scale so we don't need to do use scale later
+            # TODO figre out where/how Delta is pre-divided by scale
+        Delta_block = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
+
+        # compute dLdP and dLdS to get dLdK
+        dLdP_T = tl.dot(V_block, tl.trans(dLdO)).to(tl.float32) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+        dLdS_T = (P_T * (dLdP_T - Delta[None, :])).to(tl.float16) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+        dLdK += tl.dot(dLdS_T, tl.trans(Q_T)) # shape (BLOCK_SIZE_COL, D)
+
+        # increment pointers
+        curr_ROW += step_ROW
+        Q_T_ptrs += step_ROW * stride_N
+        dLdO_ptrs += step_ROW * stride_N
+    
+    return dLdK, dLdV
+
+
+@triton.jit
+def _attn_backward_Q(
+    dLdQ, Q, dLdO, M, Delta,
+    K_ptr, V_ptr,
+    stride_N, stride_D,
+    H, N, D: tl.constexpr,
+    BLOCK_SIZE_ROW: tl.constexpr, 
+    BLOCK_SIZE_COL: tl.constexpr,
+    start_ROW, start_COL, num_steps,
+    MASK: tl.constexpr
+):
+    """
+    this kernel will be looking at a specific chunk of K & V and iterating through
+    rows of Q to calculate that chunk of dLdK and dLdV
+    """
+    # BLOCK_SIZE_ROW must be a multiple of BLOCK_SIZE_COL or the code won't work
+        # TODO why tho?
+    tl.static_assert(BLOCK_SIZE_ROW % BLOCK_SIZE_COL == 0)
+
+    offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
+    offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
+    offsets_D = tl.arange(0, D)
+    K_and_V_T_offsets = offsets_COL[None, :] * stride_N + offsets_D[: None] * stride_D
+    K_T_ptrs = K_ptr + K_and_V_T_offsets
+    V_T_ptrs = V_ptr + K_and_V_T_offsets
+
+    # TODO again what's up with Delta relating to scale in the OG docs implementation's comments
+    Delta = tl.load(Delta_ptr + offsets_ROW)
+
+    curr_COL = start_COL
+    
+
+
+
+
+@triton.jit
 def attn_backward(
     Q_ptr, K_ptr, V_ptr, 
     scale,
     dLdO_ptr, dLdQ_ptr, dLdK_ptr, dLdV_ptr,
     M, Delta,
     stride_B, stride_H, stride_N, stride_D,
-    H, N,
-    D: tl.constexpr, 
-    BLOCK_M1: tl.constexpr,  #
-    BLOCK_N1: tl.constexpr,  #
-    BLOCK_M2: tl.constexpr,  #
-    BLOCK_N2: tl.constexpr,  #
+    H, N, D: tl.constexpr, 
+    BLOCK_SIZE_ROW_1: tl.constexpr,  #
+    BLOCK_SIZE_COL_1: tl.constexpr,  #
+    BLOCK_SIZE_ROW_2: tl.constexpr,  #
+    BLOCK_SIZE_COL_2: tl.constexpr,  #
     BLK_SLICE_FACTOR: tl.constexpr,  #
 ):
     """
@@ -627,7 +731,7 @@ def attn_backward(
         #  is more efficient than calculating the actual value every time
     
     pid = tl.program_id(0)
-    idx_batch_head = tl.program_id(2)
+    idx_batch_head = tl.program_id(1)
 
     # move pointers of (B, H, N, D) matrices to get to the correct batch and head
     idx_batch = idx_batch_head // H
@@ -646,22 +750,25 @@ def attn_backward(
     M_ptr += batch_head_jump
     Delta_ptr += batch_head_jump
 
-    # load K and V
+    ### STAGE 1: First we'll do dLdK and dLdV
     # in the fwd loop we held a block of Q in SRAM and iterated through K & V; here we'll do the opposite
-    start = pid * BLOCK_N1
-    offsets_N1 = start + tl.arange(0, BLOCK_N1)
+    start_COL = pid * BLOCK_SIZE_COL_1
+    start_ROW = start_COL # remember both rows & cols of length N in the NxN attention logits
+    offsets_COL_1 = start_COL + tl.arange(0, BLOCK_SIZE_COL_1)
     offsets_D = tl.arange(0, D)
-    KV_offsets = offsets_N1[:, None] * stride_N + offsets_D[None, :] * stride_D
+
+    # accumulate the gradients into these
+    dLdv_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
+    dLdk_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
+
+    # load K & V
+    KV_offsets = offsets_COL_1[:, None] * stride_N + offsets_D[None, :] * stride_D
     K_block = tl.load(K_ptr + KV_offsets) # remember K was pre-scaled earlier in the wrapper around the kernel
-    V_block = tl.load(V_ptr + KV_offsets)
-    
-    # we'll accumulate the gradients into here
-    dLdv_block = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
-    dLdk_block = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+    V_block = tl.load(V_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
 
     # TODO why are we cutting our block in half and how is this a mask?
-    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR 
-    num_steps = BLOCK_N1 // MASK_BLOCK_M1 
+    MASK_BLOCK_SIZE_ROW_1: tl.constexpr = BLOCK_SIZE_ROW_1 // BLK_SLICE_FACTOR 
+    num_steps = BLOCK_SIZE_COL_1 // MASK_BLOCK_SIZE_ROW_1 
 
     # compute dLdK and dLdV for masked blocks
     dLdK, dLdV = _attn_bwd_KV(
@@ -669,27 +776,76 @@ def attn_backward(
         dLdK_block, dLdV_block,
         Q_ptr, dLdO_ptr
         M_ptr, Delta_ptr,
-        scale,
         stride_N, stride_D,
-        H, N,
-        D,
-        MASK_BLOCK_M1, BLOCK_N1,
-        # TODO
+        H, N, D,
+        MASK_BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
+        start_ROW, start_COL, 
+        num_steps,
+        MASK=True
     )
 
-    start_n = start
-    start_m = start + num_steps * MASK_BLOCK_M1
-        # TODO isn't this^ just BLOCK_M1 assuming BLOCK_M1 is divisible by MASK_BLOCK_M1?
-    num_steps = (N - start_m) // BLOCK_M1
+    start_ROW += num_steps * MASK_BLOCK_SIZE_ROW_1
+    # TODO isn't this^ just BLOCK_SIZE_ROW_1?
+    num_steps = (N - start_ROW) // BLOCK_SIZE_ROW_1
 
     # compute dLdK and dLdV for non-masked blocks
     dLdK, dLdV = _attn_bwd_KV(
-        # TODO
+        K_block, V_block, 
+        dLdK_block, dLdV_block,
+        Q_ptr, dLdO_ptr
+        M_ptr, Delta_ptr,
+        stride_N, stride_D,
+        H, N, D,
+        MASK_BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
+        start_ROW, start_COL, 
+        num_steps,
+        MASK=False ###
     )
 
     # write back dLdK and dLdV
-    dLdK *= scale # TODO explain the weird scaling
+    dLdK *= scale # TODO explain the weird scaling. weren't we supposed to not need to use scale bc it was done in Delta or something?
     tl.store(dLdK_ptr + KV_offsets, dLdK)
     tl.store(dLdV_ptr + KV_offsets, dLdV)
 
-    ### Now we do dLdQ
+    ### STAGE 2: Now we do dLdQ
+    # in this part, like the forward pass we look at a specific block of Q & iterate through K & V
+    start_ROW = pid * BLOCK_SIZE_ROW_2
+    end_COL = start_ROW + BLOCK_SIZE_ROW_M2
+    MASK_BLOCK_SIZE_COL_2: tl.constexpr = BLOCK_SIZE_COL_2 // BLK_SLICE_FACTOR
+    offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW_2)
+
+    Q_offsets = offsets_ROW[:, None] * stride_N + offsets_D[None, :] * stride_D
+    Q = tl.load(Q_ptr + Q_offsets) # shape (BLOCK_SIZE_ROW_2, D)
+    dLdQ = tl.zeros([BLOCK_SIZE_ROW_2, D], dtype=tl.float32)
+    dLdO = tl.load(dLdO_ptr + Q_offsets) # dLdO shares the same shape as Q so it can use same offsets
+    M = tl.load(M_ptr + offsets_ROW)[:, None] # shape (BLOCK_SIZE_ROW_2, 1)
+
+    # compute dQ for masked blocks (blocks on the diagonal)
+    # TODO better understand the scanning structure & the comment at this same spot in attention_triton_docs.ppy
+    num_steps = BLOCK_SIZE_ROW_2 // MASK_BLOCK_SIZE_COL_2
+    start_COL = end_COL - num_steps * MASK_BLOCK_COL_2
+    dLdQ = _attn_bwd_Q(
+        dLdQ, Q, dLdO, M, Delta,
+        K_ptr, V_ptr,
+        stride_N, stride_D,
+        H, N, D,
+        BLOCK_SIZE_ROW_2, MASK_BLOCK_SIZE_COL_2,
+        start_ROW, start_COL, num_steps,
+        MASK=True
+    )
+    end_COL -= num_steps * MASK_BLOCK_COL_2
+
+    num_steps = end_COL // BLOCK_SIZE_COL_2
+    start_COL = end_COL - num_steps * BLOCK_SIZE_COL_2
+    # TODO why do "dLdQ = ..." when we could just call the kernel? does it do anything? Is it just to indicate what we're editing?
+    dLdQ = _attn_backward_Q(
+        dLdQ, Q, dLdO, M, Delta,
+        K_ptr, V_ptr,
+        stride_N, stride_D,
+        H, N, D,
+        BLOCK_SIZE_ROW_2, MASK_BLOCK_SIZE_COL_2,
+        start_ROW, start_COL, num_steps,
+        MASK=False
+    )
+    dLdQ *= ln2
+    tl.store(dLdQ_ptr + Q_offsets, dLdQ)
