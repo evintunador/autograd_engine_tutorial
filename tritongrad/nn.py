@@ -292,12 +292,50 @@ class FlashAttention(Module):
         # wrap output in a triton tensor to add it to our graph
         out = TritonTensor(
             O, 
-            requires_grad= Q.requires_grad or K.requires_grad or V.requires_grad,
+            requires_grad = True,
             _children = (Q, K, V)
         )
 
         def _backward():
-            pass
+            # this module assumes everything needs a gradient, we're not gonna bother giving the option
+            assert out.grad.is_contiguous()
+            assert Q.data.stride() == K.data.stride() == V.data.stride() == out.data.stride() == out.grad.stride()
+            
+            PRE_BLOCK = 128 # TODO wat dis?
+            BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32 # TODO make these autotuned
+            BLK_SLICE_FACTOR = 2 # TODO what is slice factor?
+            rln2 = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
+            # pre-scale the keys in a format including RCP_LN2 to take advantage of exponential arithmetic we'll see later
+            arg_K = K * (scale * rln2)
+            
+            # TODO i think this lets us ignore masking in the preprocessing kernel? kind of a dumb requirement
+            assert N % PRE_BLOCK == 0
+            # the ordering of your grid matters because it determines which programs end up sharing the same SRAM
+            pre_grid = (N // PRE_BLOCK, B * H)
+                # in this case, we want the parallelizations along the N dimension to be near each other so they can
+                #  share data, while parallelization across batches & heads don't necessitate any sharing
+            Delta = torch.empty_like(M)
+            modules.attn_bwd_preprocess[pre_grid](
+                out.data. out.grad,
+                Delta,
+                B, H, N,
+                BLOCK_SIZE_ROW = PRE_BLOCK,
+                HEAD_DIM = D,
+            )
+
+            grid = (N // BLOCK_N1, 1, B * H)
+            modules.attn_bwd[grid](
+                Q, arg_K, V,
+                scale,
+                out.grad, Q.grad, arg_K.grad, V.grad,
+                M, Delta,
+                Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
+                H, N,
+                D=D,
+                BLOCK_M1=BLOCK_M1, BLOCK_N1=BLOCK_N1, # for the first sub-kernel to get called
+                BLOCK_M2=BLOCK_M2, BLOCK_N2=BLOCK_N2, # for the second sub-kernel to get called
+                BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
+            )
         out._backward = _backward
 
         return out

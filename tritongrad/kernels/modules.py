@@ -258,7 +258,7 @@ def _attn_fwd_inner(
     DIAGONAL: tl.constexpr,
     offsets_q: tl.constexpr,
     offsets_kv: tl.constexpr,
-    SEQ_LEN: tl.constexpr,
+    N: tl.constexpr,
 ):
     # range of values handled by this stage
     if CAUSAL and DIAGONAL:
@@ -270,7 +270,7 @@ def _attn_fwd_inner(
     elif CAUSAL: # any blocks in the causal mask below the diagonal
         lo, hi = 0, block_index_q * BLOCK_SIZE_Q
     else: # runs on every single block for the case that we're not using a causal mask
-        lo, hi = 0, SEQ_LEN
+        lo, hi = 0, N
 
     K_T_block_ptrs = tl.advance(K_T_block_ptrs, (0, lo)) # tuple because you choose which dimension to advance
     V_block_ptrs = tl.advance(V_block_ptrs, (lo, 0))
@@ -322,7 +322,7 @@ def _attn_fwd_inner(
 
         m_i = m_ij # sets old max equal to new max, ready to be used by next iteration of for loop
 
-        # Move to the next block of K and V along the SEQ_LEN dimension
+        # Move to the next block of K and V along the N dimension
         V_block_ptrs = tl.advance(V_block_ptrs, (BLOCK_SIZE_KV, 0))
         K_T_block_ptrs = tl.advance(K_T_block_ptrs, (0, BLOCK_SIZE_KV))
         """
@@ -341,30 +341,35 @@ def _attn_fwd_inner(
             {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
             num_stages=num_stages, num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32] # values chosen heuristically
+        for BLOCK_SIZE_Q in [32]
         for BLOCK_SIZE_KV in [32]
         for num_stages in ([1])
         for num_warps in [2, 4]
     ],
-    key=["SEQ_LEN", "HEAD_DIM"], # auto-tune will re-run every time either of these values changes in a new input
+    key=["N", "HEAD_DIM"], # auto-tune will re-run every time either of these values changes in a new input
 )
 @triton.jit
 def _attn_fwd(
-    Q_ptr, K_ptr,  V_ptr,  # each shape (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    Q_ptr, K_ptr,  V_ptr,  # each shape (BATCH_SIZE, NUM_HEADS, N, HEAD_DIM)
     softmax_scale,
-    M_ptr,  # shape (BATCH_SIZE, NUM_HEADS, SEQ_LEN). here we first store the max values of each row & later the logsumexp trick 
-    O_ptr,  # shape (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM). where we store the final output
+    M_ptr,  # shape (BATCH_SIZE, NUM_HEADS, N). here we first store the max values of each row & later the logsumexp trick 
+    O_ptr,  # shape (BATCH_SIZE, NUM_HEADS, N, HEAD_DIM). where we store the final output
     stride_Q_batch, stride_Q_head, stride_Q_seq, stride_Q_dim, # dist to move thru mem to next entry in that dim of that tensor
     stride_K_batch, stride_K_head, stride_K_seq, stride_K_dim,
     stride_V_batch, stride_V_head, stride_V_seq, stride_V_dim,
     stride_O_batch, stride_O_head, stride_O_seq, stride_O_dim,
     BATCH_SIZE, # unlike other tensor dimensions, batch size needs to be flexible for runtime differences
     # meta-parameters (decided at compile-time)
-    NUM_HEADS: tl.constexpr, SEQ_LEN: tl.constexpr, 
+    NUM_HEADS: tl.constexpr, N: tl.constexpr, 
     HEAD_DIM: tl.constexpr, # should always be a power of 2, and really 128 and 256 are the only reasonable options
     BLOCK_SIZE_Q: tl.constexpr, BLOCK_SIZE_KV: tl.constexpr,
     CAUSAL: tl.constexpr,
 ):
+    """
+    this implementation of the flash-attention forward pass was created entirely from the psuedocode in the two papers
+    https://arxiv.org/abs/2205.14135
+    https://arxiv.org/abs/2307.08691
+    """
     # as opposed to regular assert, static_assert occurs at compile-time
     tl.static_assert(BLOCK_SIZE_KV <= HEAD_DIM)
         # head_dim is usually relatively small (128 or 256) so it wouldn't make sense to parallelize within it
@@ -379,14 +384,14 @@ def _attn_fwd(
     # This indicates the position of the head in the batch
     index_head = index_batch_head % NUM_HEADS
 
-    # This allows to get the shape (SEQ_LEN, HEAD_DIM) block in the Q, K, V by indexing it by batch and head
+    # This allows to get the shape (N, HEAD_DIM) block in the Q, K, V by indexing it by batch and head
     qkv_offset = index_batch * stride_Q_batch + index_head * stride_Q_head
 
     # so here's a new function that does the math of finding the right pointer for us
     Q_block_ptrs = tl.make_block_ptr(
         base=Q_ptr + qkv_offset, # base pointer to the parent tensor
             # notice our parent tensor is actually a single splice of the original Q rather than the full Q
-        shape=(SEQ_LEN, HEAD_DIM), # shape of the parent tensor
+        shape=(N, HEAD_DIM), # shape of the parent tensor
         strides=(stride_Q_seq, stride_Q_dim), # strides of the parent tensor
         offsets=(block_index_q * BLOCK_SIZE_Q, 0), # offsets to get to the block of interest for this PID
         block_shape=(BLOCK_SIZE_Q, HEAD_DIM), # shape of the block
@@ -395,18 +400,18 @@ def _attn_fwd(
     """
     # Here is the above ^ function implemented manually.
 
-    # Our base pointer is actually going to be a specific batch and head, meaing we're working with a (SEQ_LEN,HEAD_DIM) matrix.
+    # Our base pointer is actually going to be a specific batch and head, meaing we're working with a (N,HEAD_DIM) matrix.
     Q_ptr += qkv_offset 
 
-    # Offsets for seq_len are split by pids but for head_dim we keep the whole thing in SRAM.
-    offsets_Q_seq_len = block_index_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    # Offsets for N are split by pids but for head_dim we keep the whole thing in SRAM.
+    offsets_Q_N = block_index_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
     offsets_Q_head_dim = tl.arange(0, HEAD_DIM)
     
     # putting it all together we 
-        # 1. start at the first entry of the (SEQ_LEN,HEAD_DIM matrix),
-        # 2. turn the seq_len and head_dim components into 2D tensors to match
+        # 1. start at the first entry of the (N,HEAD_DIM matrix),
+        # 2. turn the N and head_dim components into 2D tensors to match
         # 3. adjust for stride length in memory
-    Q_block_ptrs = Q_ptr + (offsets_Q_seq_len[:, None] * stride_Q_seq + offsets_Q_head_dim[None, :] * stride_Q_dim)
+    Q_block_ptrs = Q_ptr + (offsets_Q_N[:, None] * stride_Q_seq + offsets_Q_head_dim[None, :] * stride_Q_dim)
     
     HERE'S THE THING:
     when writing a kernel, you have to choose between whether you're going to use make_block_ptr or do it manually.
@@ -418,9 +423,9 @@ def _attn_fwd(
     # we transpose K while loading it (as opposed to writing a whole separate kernel for transpose)
     K_T_block_ptrs = tl.make_block_ptr(
         base=K_ptr + qkv_offset,
-        shape=(HEAD_DIM, SEQ_LEN), # notice the transposed dims
+        shape=(HEAD_DIM, N), # notice the transposed dims
         strides=(stride_K_dim, stride_K_seq),  # by inverting the strides, we are transposing the matrix
-        offsets=(0, 0), # no seq_len offsets because for K & V we parallelize across seq_len in for loop in _attn_inner_fwd()
+        offsets=(0, 0), # no N offsets because for K & V we parallelize across N in for loop in _attn_inner_fwd()
         block_shape=(HEAD_DIM, BLOCK_SIZE_KV), # don't forget transpose means this shape is flipped
         order=(0, 1), # order is how we tell tl.make_block_ptr that we're transposing, it denotes the "order of the original data format"
     )
@@ -428,16 +433,16 @@ def _attn_fwd(
     Here is the above ^ function implemented manually. 
     Remember you can't mix automatic & manual pointer implementations; choose one & stick to it
     K_ptr += qkv_offset
-    offsets_K_seq_len = tl.arange(0, BLOCK_SIZE_KV)
+    offsets_K_N = tl.arange(0, BLOCK_SIZE_KV)
     offsets_V_head_dim = tl.arange(0, HEAD_DIM)
-    K_T_block_ptrs = K_ptr + (offsets_K_seq_len[None, :] * stride_V_seq + offsets_V_head_dim[:, None] * stride_V_dim)
+    K_T_block_ptrs = K_ptr + (offsets_K_N[None, :] * stride_V_seq + offsets_V_head_dim[:, None] * stride_V_dim)
     #"""
 
     V_block_ptrs = tl.make_block_ptr(
         base=V_ptr + qkv_offset,
-        shape=(SEQ_LEN, HEAD_DIM),
+        shape=(N, HEAD_DIM),
         strides=(stride_V_seq, stride_V_dim),
-        offsets=(0, 0), # no seq_len offsets because for K & V we parallelize across seq_len in for loop in _attn_inner_fwd()
+        offsets=(0, 0), # no N offsets because for K & V we parallelize across N in for loop in _attn_inner_fwd()
         block_shape=(BLOCK_SIZE_KV, HEAD_DIM),
         order=(1, 0),
     )
@@ -445,14 +450,14 @@ def _attn_fwd(
     Here is the above ^ function implemented manually. 
     Remember you can't mix automatic & manual pointer implementations; choose one & stick to it
     V_ptr += qkv_offset
-    offsets_V_seq_len = tl.arange(0, BLOCK_SIZE_KV)
+    offsets_V_N = tl.arange(0, BLOCK_SIZE_KV)
     offsets_V_head_dim = tl.arange(0, HEAD_DIM)
-    V_block_ptrs = V_ptr + (offsets_V_seq_len[:, None] * stride_V_seq + offsets_V_head_dim[None, :] * stride_V_dim)
+    V_block_ptrs = V_ptr + (offsets_V_N[:, None] * stride_V_seq + offsets_V_head_dim[None, :] * stride_V_dim)
     #"""
 
     O_block_ptrs = tl.make_block_ptr( # this should all look the same as Q
         base=O_ptr + qkv_offset,
-        shape=(SEQ_LEN, HEAD_DIM),
+        shape=(N, HEAD_DIM),
         strides=(stride_O_seq, stride_O_dim),
         offsets=(block_index_q * BLOCK_SIZE_Q, 0),
         block_shape=(BLOCK_SIZE_Q, HEAD_DIM),
@@ -462,9 +467,9 @@ def _attn_fwd(
     Here is the above ^ function implemented manually. 
     Remember you can't mix automatic & manual pointer implementations; choose one & stick to it
     O_ptr += qkv_offset
-    offsets_O_seq_len = block_index_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
+    offsets_O_N = block_index_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
     offsets_V_head_dim = tl.arange(0, HEAD_DIM)
-    O_block_ptrs = O_ptr + (offsets_O_seq_len[:, None] * stride_O_seq + offsets_V_head_dim[None, :] * stride_O_dim)
+    O_block_ptrs = O_ptr + (offsets_O_N[:, None] * stride_O_seq + offsets_V_head_dim[None, :] * stride_O_dim)
     #"""
 
     # these next two were calculated internally by calls of make_block_ptr() but not given to us and still needed by us.
@@ -504,7 +509,7 @@ def _attn_fwd(
         False, # blocks on the DIAGONAL get special treatment if this is set to true; we use it below
         offsets_q,
         offsets_kv,
-        SEQ_LEN,
+        N,
     )
 
     if CAUSAL: # This step runs for the blocks on the diagonal in the causal attention mask
@@ -525,7 +530,7 @@ def _attn_fwd(
             True, # blocks on the diagonal get special masking treatment
             offsets_q,
             offsets_kv,
-            SEQ_LEN,
+            N,
         )
     
     # finally dividing by the denominator of our softmax.
@@ -545,6 +550,146 @@ def _attn_fwd(
         #  but the name was decided earlier and still makes sense in the context of using m_i for maxes in most ops
     
     # storing it all back to DRAM
-    m_block_ptrs = M_ptr + index_batch_head * SEQ_LEN + offsets_q
+    m_block_ptrs = M_ptr + index_batch_head * N + offsets_q
     tl.store(m_block_ptrs, m_i)
     tl.store(O_block_ptrs, O_block)
+
+
+@triton.autotune(
+    [
+        triton.Config({"BLOCK_SIZE_ROW": BLOCK_SIZE_ROW},
+                        num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_ROW in [128]
+        for num_stages in ([5])
+        for num_warps in [4]
+    ],
+    key=["N", "HEAD_DIM"], # auto-tune will re-run every time either of these values changes in a new input
+)
+@triton.jit
+def attn_backward_preprocess(
+    O_ptr,
+    dLdO_ptr,
+    Delta_ptr,
+    N,
+    BLOCK_SIZE_ROW: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    """the job of this kernel is to pre-compute Delta since Delta is used by both of the following two kernels"""
+    index_batch_head = tl.program_id(0) # BATCH_SIZE * NUM_HEADS number of pids
+    row = tl.program_id(1) # N / BLOCK_SIZE_ROW number of pids
+
+    row_offsets = row * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW)
+    col_offsets = tl.arange(0, HEAD_DIM)
+
+    # Load BLOCK_SIZE_ROW rows of O
+    O_ptr += idx_batch_head * HEAD_DIM * N # moves O_ptr to the correct batch & head for this pid.
+        # HEAD_DIM * N is equal to stride_num_heads. we can use it instead of .stride() assuming we know dLdO is contiguous
+    O_offsets = row_offsets[:, None] * HEAD_DIM + col_offsets[None, :]
+    O_block = tl.load(O_ptr + O_offsets) # shape (BLOCK_SIZE_ROW, HEAD_DIM)
+
+    # Load BLOCK_SIZE_ROW rows of dLdO
+    dLdO_ptr += index_batch_head * HEAD_DIM * N
+    dLdO_offsets = row_offsets[:, None] * HEAD_DIM + col_offsets[None, :]
+    dLdO_block = tl.load(dLdO_ptr + dLdO_offsets) # shape (BLOCK_SIZE_ROW, HEAD_DIM) 
+
+    # Delta is the dot product of O and dLdO along HEAD_DIM, giving us a single scalar Delta_i per token in N
+    # it will be useful in later parts of the backward pass
+    Delta_block = tl.sum(dO_block * O_block, axis=1) # shape (BLOCK_SIZE_ROW)
+    Delta_offsets = index_batch_head * N + row_offsets
+    tl.store(Delta_ptr + Delta_offsets, Delta_block)
+
+
+@triton.jit
+def attn_backward(
+    Q_ptr, K_ptr, V_ptr, 
+    scale,
+    dLdO_ptr, dLdQ_ptr, dLdK_ptr, dLdV_ptr,
+    M, Delta,
+    stride_B, stride_H, stride_N, stride_D,
+    H, N,
+    D: tl.constexpr, 
+    BLOCK_M1: tl.constexpr,  #
+    BLOCK_N1: tl.constexpr,  #
+    BLOCK_M2: tl.constexpr,  #
+    BLOCK_N2: tl.constexpr,  #
+    BLK_SLICE_FACTOR: tl.constexpr,  #
+):
+    """
+    this implementation of the flash-attention backward pass is derived from the Triton documentation tutorials,
+    which is actually a bit faster than the flash-attention implementation described in the original papers
+    https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#sphx-glr-getting-started-tutorials-06-fused-attention-py
+    
+    my edits focus on changing variable names, rearranging, and adding hella comments to help it all make sense
+    """
+    # TODO so i guess we'll use this on K later?
+    ln2: tl.constexpr = 0.6931471824645996  # = ln(2)
+        # generally defining a known constant as an approximation of itself to some number of digits
+        #  is more efficient than calculating the actual value every time
+    
+    pid = tl.program_id(0)
+    idx_batch_head = tl.program_id(2)
+
+    # move pointers of (B, H, N, D) matrices to get to the correct batch and head
+    idx_batch = idx_batch_head // H
+    idx_head = idx_batch_head % H 
+    batch_head_jump = (idx_batch * stride_B + idx_head * stride_H)#.to(tl.int64)
+    Q_ptr += batch_head_jump
+    K_ptr += batch_head_jump
+    V_ptr += batch_head_jump
+    dLDO_ptr += batch_head_jump
+    dLDQ_ptr += batch_head_jump
+    dLDK_ptr += batch_head_jump
+    dLDV_ptr += batch_head_jump
+
+    # move pointers of (B, H, N) matrices to get to the correct batch and head
+    batch_head_jump = (idx_batch_head * N)#.to(tl.int64)
+    M_ptr += batch_head_jump
+    Delta_ptr += batch_head_jump
+
+    # load K and V
+    # in the fwd loop we held a block of Q in SRAM and iterated through K & V; here we'll do the opposite
+    start = pid * BLOCK_N1
+    offsets_N1 = start + tl.arange(0, BLOCK_N1)
+    offsets_D = tl.arange(0, D)
+    KV_offsets = offsets_N1[:, None] * stride_N + offsets_D[None, :] * stride_D
+    K_block = tl.load(K_ptr + KV_offsets) # remember K was pre-scaled earlier in the wrapper around the kernel
+    V_block = tl.load(V_ptr + KV_offsets)
+    
+    # we'll accumulate the gradients into here
+    dLdv_block = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+    dLdk_block = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+
+    # TODO why are we cutting our block in half and how is this a mask?
+    MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR 
+    num_steps = BLOCK_N1 // MASK_BLOCK_M1 
+
+    # compute dLdK and dLdV for masked blocks
+    dLdK, dLdV = _attn_bwd_KV(
+        K_block, V_block, 
+        dLdK_block, dLdV_block,
+        Q_ptr, dLdO_ptr
+        M_ptr, Delta_ptr,
+        scale,
+        stride_N, stride_D,
+        H, N,
+        D,
+        MASK_BLOCK_M1, BLOCK_N1,
+        # TODO
+    )
+
+    start_n = start
+    start_m = start + num_steps * MASK_BLOCK_M1
+        # TODO isn't this^ just BLOCK_M1 assuming BLOCK_M1 is divisible by MASK_BLOCK_M1?
+    num_steps = (N - start_m) // BLOCK_M1
+
+    # compute dLdK and dLdV for non-masked blocks
+    dLdK, dLdV = _attn_bwd_KV(
+        # TODO
+    )
+
+    # write back dLdK and dLdV
+    dLdK *= scale # TODO explain the weird scaling
+    tl.store(dLdK_ptr + KV_offsets, dLdK)
+    tl.store(dLdV_ptr + KV_offsets, dLdV)
+
+    ### Now we do dLdQ
