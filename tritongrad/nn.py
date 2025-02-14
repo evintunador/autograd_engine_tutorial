@@ -255,38 +255,20 @@ class FlashAttention(Module):
         O = torch.empty_like(Q.data) # output tensor will be pre head concatenation and mixing
         # and pre-allocate logsumexp
         M = torch.empty((B, H, N), device=Q.device, dtype=torch.float32)
-
+        
         grid = lambda args: (
             triton.cdiv(N, args["BLOCK_SIZE_Q"]), # primary parallelizatoin is across sequence length
             B * H, # parallelize across the dimensions that don't matter
-            1, # include the 1 for clarity of total dims even though it's not strictly necessary
         )
-        modules._attn_fwd[grid](
-            Q_ptr=Q.data, K_ptr=K.data, V_ptr=V.data,
-            softmax_scale=scale,
-            M_ptr=M,
-            O_ptr=O,
-            stride_Q_batch=Q.data.stride(0),
-            stride_Q_head=Q.data.stride(1),
-            stride_Q_seq=Q.data.stride(2),
-            stride_Q_dim=Q.data.stride(3),
-            stride_K_batch=K.data.stride(0),
-            stride_K_head=K.data.stride(1),
-            stride_K_seq=K.data.stride(2),
-            stride_K_dim=K.data.stride(3),
-            stride_V_batch=V.data.stride(0),
-            stride_V_head=V.data.stride(1),
-            stride_V_seq=V.data.stride(2),
-            stride_V_dim=V.data.stride(3),
-            stride_O_batch=O.stride(0),
-            stride_O_head=O.stride(1),
-            stride_O_seq=O.stride(2),
-            stride_O_dim=O.stride(3),
-            BATCH_SIZE=B,
-            NUM_HEADS=H,
-            SEQ_LEN=N,
-            HEAD_DIM=D,
-            CAUSAL=is_causal,
+        modules.attn_fwd[grid](
+            Q.data, K.data, V.data, M, O,
+            scale,
+            Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3),
+            K.data.stride(0), K.data.stride(1), K.data.stride(2), K.data.stride(3),
+            V.data.stride(0), V.data.stride(1), V.data.stride(2), V.data.stride(3),
+            O.stride(0), O.stride(1), O.stride(2), O.stride(3),
+            B, H, N, D,
+            is_causal,
         )
 
         # wrap output in a triton tensor to add it to our graph
@@ -298,43 +280,34 @@ class FlashAttention(Module):
 
         def _backward():
             # this module assumes everything needs a gradient, we're not gonna bother giving the option
-            assert out.grad.is_contiguous()
+
+            # for some reason out.grad isn't contiguous by default; prolly a skill issue tbh
+            out.grad = out.grad.contiguous()
             assert Q.data.stride() == K.data.stride() == V.data.stride() == out.data.stride() == out.grad.stride()
             
             Delta = torch.empty_like(M)
-            PRE_BLOCK_SIZE_ROW = 128 # TODO autotune this instead of setting it
-            # TODO i think this lets us ignore masking in the preprocessing kernel? kind of a dumb requirement
-            assert N % PRE_BLOCK_SIZE_ROW == 0
+
             # the ordering of your grid matters because it determines which programs end up sharing the same SRAM
-            pre_grid = (N // PRE_BLOCK_SIZE_ROW, B * H)
+            pre_grid = lambda meta: (N // meta["PRE_BLOCK_SIZE_ROW"], B * H)
                 # in this case, we want the parallelizations along the N dimension to be near each other so they can
                 #  share data, while parallelization across batches & heads don't necessitate any sharing
-            modules.attn_bwd_preprocess[pre_grid](
-                out.data. out.grad,
-                Delta,
-                B, H, N,
-                BLOCK_SIZE_ROW = PRE_BLOCK_SIZE_ROW,
-                HEAD_DIM = D,
+            modules.attn_backward_preprocess[pre_grid](
+                out.data, out.grad, Delta,
+                N, D,
             )
 
-            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 32, 128 # TODO make these autotuned
-            BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2 = 128, 32 
-            BLK_SLICE_FACTOR = 2 # TODO what is slice factor?
-            rln2 = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
-            # pre-scale the keys in a format including RCP_LN2 to take advantage of exponential arithmetic we'll see later
-            arg_K = K * (scale * rln2) # TODO integrate this pre-scaling into the kernel to avoid the 2 mem accesses
+            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 16, 32 # TODO make these autotuned
+            BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2 = 32, 16
             grid = (N // BLOCK_SIZE_ROW_1, B * H)
-            modules.attn_bwd[grid](
-                Q, arg_K, V,
-                scale,
-                out.grad, Q.grad, arg_K.grad, V.grad,
+            modules.attn_backward[grid](
+                Q.data, K.data, V.data,
+                out.grad, Q.grad, K.grad, V.grad,
                 M, Delta,
+                scale,
                 Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
-                H, N,
-                D=D,
-                BLOCK_SIZE_ROW_1=BLOCK_SIZE_ROW_1, BLOCK_NSIZE_COL1=BLOCK_NSIZE_COL1, # for the first sub-kernel 
-                BLOCK_SIZE_ROW_2=BLOCK_SIZE_ROW_2, BLOCK_NSIZE_COL2=BLOCK_NSIZE_COL2, # for the second sub-kernel
-                BLK_SLICE_FACTOR=BLK_SLICE_FACTOR,
+                H, N, D,
+                BLOCK_SIZE_ROW_1=BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1=BLOCK_SIZE_COL_1, # for the first sub-kernel 
+                BLOCK_SIZE_ROW_2=BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2=BLOCK_SIZE_COL_2, # for the second sub-kernel
             )
         out._backward = _backward
 
