@@ -301,7 +301,7 @@ class FlashAttention(Module):
             assert out.grad.is_contiguous()
             assert Q.data.stride() == K.data.stride() == V.data.stride() == out.data.stride() == out.grad.stride()
             
-            PRE_BLOCK = 128 # TODO wat dis?
+            PRE_BLOCK = 128 # TODO autotune this instead of setting it
             BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32 # TODO make these autotuned
             BLK_SLICE_FACTOR = 2 # TODO what is slice factor?
             rln2 = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
