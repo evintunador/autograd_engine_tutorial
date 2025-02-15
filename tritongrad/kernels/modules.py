@@ -370,6 +370,10 @@ def attn_fwd(
     https://arxiv.org/abs/2205.14135
     https://arxiv.org/abs/2307.08691
     """
+    # in order to use tl.exp2 later isntead of tl.exp (the former is faster) we need to scale our scale
+    rln2: tl.constexpr = 1.4426950408889634
+    softmax_scale *= rln2
+
     # as opposed to regular assert, static_assert occurs at compile-time
     tl.static_assert(BLOCK_SIZE_KV <= D)
         # D is usually relatively small (128 or 256) so it wouldn't make sense to parallelize within it
@@ -482,7 +486,7 @@ def attn_fwd(
     #m_i = tl.zeros([BLOCK_SIZE_Q], dtype=tl.float32) - float("inf") 
     m_i = tl.full(shape=[BLOCK_SIZE_Q], value=-1e6, dtype=tl.float32)
     # the running sum. We have one for each query (since we sum the attention scores by rows)
-    l_i = tl.zeros([BLOCK_SIZE_Q], dtype=tl.float32) + 1.0 # the +1 is because we'll be using exponentials and e^0=1
+    l_i = tl.full(shape=[BLOCK_SIZE_Q], value=1.0, dtype=tl.float32) # 1 is because we'll be using exponentials and e^0=1
     
     # the accumulator for the output, which is a group of rows of the O matrix
     O_block = tl.zeros([BLOCK_SIZE_Q, D], dtype=tl.float32)
@@ -615,55 +619,46 @@ def _attn_backward_KV(
     this kernel will be looking at a specific chunk of K & V and iterating through
     rows of Q to calculate that chunk of dLdK and dLdV
     """
-    # BLOCK_SIZE_COL must be a multiple of BLOCK_SIZE_ROW or the code won't work
-        # TODO why tho?
-    tl.static_assert(BLOCK_SIZE_COL % BLOCK_SIZE_ROW == 0)
-    
     offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
     offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
     offsets_D = tl.arange(0, D)
-    Q_T_ptrs = Q_ptr + offsets_D[:, None] * stride_D + offsets_ROW[None, :] * stride_N # notice transpose
-    dLdO_ptrs = dLdO_ptr + offsets_ROW[:, None] * stride_N + offsets_D[None, :] * stride_D
 
-    curr_ROW = start_ROW
-    step_ROW = BLOCK_SIZE_ROW
+    # we transpose Q while loading it rather than in a separate kernel
+    Q_T_ptrs = Q_ptr        + offsets_D[:, None] * stride_D     + offsets_ROW[None, :] * stride_N
+    dLdO_ptrs = dLdO_ptr    + offsets_ROW[:, None] * stride_N   + offsets_D[None, :] * stride_D
+
     for block_idx in range(num_steps):
-        # we transpose Q while loading it
-        Q_T = tl.load(Q_T_ptrs) # shape (D, BLOCK_SIZE_ROW)
-
-        # we load M before computing S to reduce pipeline stall,
+        # we load M before computing S to reduce pipeline stall (and dLdO before computing dLdV)
         # meaning the Triton compiler can have an easier time doing the loading of M
-        # and the dot product of K and QT simultaneously
-        offsets_ROW = curr_ROW + tl.arange(0, BLOCK_SIZE_ROW)
-            # TODO couldn't i just do offsets_ROW += step_ROW? 
+        # and the dot product of K and QT simultaneously. in general you should load a bunch
+        # of stuff then calc a bunch of stuff rather than loading right before you calc
+        Q_T = tl.load(Q_T_ptrs) # shape (D, BLOCK_SIZE_ROW)
         M = tl.load(M_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
+        dLdO = tl.load(dLdO_ptrs) # shape (BLOCK_SIZE_ROW, D)
+        Delta = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
 
-        # calculate transpose of S and then P matrices
+        # calculate transpose of S and P matrices
         S_T = tl.dot(K, Q_T) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+            # no scale here because the operation is associative & cheaper to do later;
+            # doing it here would be to do it for EVERY TIME we accumulate into dLdK
         P_T = tl.exp2(S_T - M[None, :]) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
-
         if MASK:
             mask = (offsets_ROW[None, :] >= offsets_COL[:, None]) # (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
             P_T = tl.where(mask, P_T, 0.)
 
         # compute dLdV
-        dLdO = tl.load(dLdO_ptrs) # shape (BLOCK_SIZE_ROW, D)
         dLdV += tl.dot(P_T, dLdO) # shape (BLOCK_SIZE_COL, D)
 
-        # Delta is pre-divided by scale so we don't need to do use scale later
-            # TODO figre out where/how Delta is pre-divided by scale
-        Delta = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
-
-        # compute dLdP and dLdS to get dLdK
-            # TODO is it dLdP and dLdS or some ohter parital derivative?
+        # compute dLdP_T and dLdS_T to get dLdK
         dLdP_T = tl.dot(V, tl.trans(dLdO)) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
-        dLdS_T = (P_T * (dLdP_T - Delta[None, :])) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
-        dLdK += tl.dot(dLdS_T, tl.trans(Q_T)) # shape (BLOCK_SIZE_COL, D)
+        dLdS_T = P_T * (dLdP_T - Delta[None, :]) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+        dLdK = tl.dot(dLdS_T, tl.trans(Q_T), acc=dLdK) # shape (BLOCK_SIZE_COL, D)
+            # acc tells the tl.dot to accumulate into dLdK
 
         # increment pointers
-        curr_ROW += step_ROW
-        Q_T_ptrs += step_ROW * stride_N
-        dLdO_ptrs += step_ROW * stride_N
+        offsets_ROW += BLOCK_SIZE_ROW
+        Q_T_ptrs += BLOCK_SIZE_ROW * stride_N
+        dLdO_ptrs += BLOCK_SIZE_ROW * stride_N
     
     return dLdK, dLdV
 
@@ -688,45 +683,38 @@ def _attn_backward_Q(
     attention logits, where the first N are split up by "BLOCK_SIZE_ROW" and the second N
     is split up by "BLOCK_SIZE_COL"
     """
-    # BLOCK_SIZE_ROW must be a multiple of BLOCK_SIZE_COL or the code won't work
-        # TODO why tho?
-    tl.static_assert(BLOCK_SIZE_ROW % BLOCK_SIZE_COL == 0)
-
     offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
     offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
     offsets_D = tl.arange(0, D)
+
+    # we transpose V while loading it
     K_and_V_T_offsets = offsets_COL[None, :] * stride_N + offsets_D[:, None] * stride_D
     K_T_ptrs = K_ptr + K_and_V_T_offsets
     V_T_ptrs = V_ptr + K_and_V_T_offsets
 
-    # TODO again what's up with Delta relating to scale in the OG docs implementation's comments
-    Delta = tl.load(Delta_ptr + offsets_ROW)
+    Delta = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIE_ROW)
 
-    curr_COL = start_COL
-    step_COL = BLOCK_SIZE_COL
     for block_idx in range(num_steps):
         K_T = tl.load(K_T_ptrs) * rln2 # shape (BLOCK_SIZE_COL, D)
         V_T = tl.load(V_T_ptrs) # shape (BLOCK_SIZE_COL, D)
 
         S = tl.dot(Q, K_T) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
-        P = tl.math.exp2(S - M)
-
+        P = tl.exp2(S - M)
         if MASK:
-            offsets_COL = curr_COL + tl.arange(0, BLOCK_SIZE_COL)
             mask = (offsets_ROW[:, None] >= offsets_COL[None, :])
             P = tl.where(mask, P, 0.)
 
         # calc dLdP and dLdS to get dLdQ
-            # TODO is it dLdP and dLdS or some ohter parital derivative?
         dLdP = tl.dot(dLdO, V_T)
         dLdS = P * (dLdP - Delta[:, None])
-        dLdQ += tl.dot(dLdS, tl.trans(K_T))
+        dLdQ = tl.dot(dLdS, tl.trans(K_T), acc=dLdQ) # acc tells the tl.dot to accumulate into dLdQ
             # we'll need to de-sdcale dLdQ in the end because K_T was pre-scaled
+            # we do it later instead of now bc now would mean num_steps * flops versus just flops
         
         # increment pointers
-        curr_COL += step_COL
-        K_T_ptrs += step_COL * stride_N
-        V_T_ptrs += step_COL * stride_N
+        offsets_COL += BLOCK_SIZE_COL
+        K_T_ptrs += BLOCK_SIZE_COL * stride_N
+        V_T_ptrs += BLOCK_SIZE_COL * stride_N
     
     return dLdQ
 
@@ -751,19 +739,19 @@ def attn_backward(
     
     my edits focus on changing variable names, rearranging, and adding hella comments to help it all make sense
     """
-    ln2: tl.constexpr = 0.6931471824645996  # = ln(2)
+    # we'll use these constants later on Q
+    ln2: tl.constexpr = 0.6931471824645996  # = ln(2), natural logarithm of 2
     rln2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
         # generally defining a known constant as an approximation of itself to some number of digits
         #  is more efficient than calculating the actual value every time
-        # TODO i was guessing there^, need to confirm that it's true
-    
-    pid = tl.program_id(0)
-    idx_batch_head = tl.program_id(1)
+    # TODO explain how/why we use this. is it becasuse we use tl.exp2 instead of tl.math.exp
+    #  and then need to revert back later w exponential arithmetic?
 
     # move pointers of (B, H, N, D) matrices to get to the correct batch and head
+    idx_batch_head = tl.program_id(1)
     idx_batch = idx_batch_head // H
     idx_head = idx_batch_head % H 
-    batch_head_jump = (idx_batch * stride_B + idx_head * stride_H)#.to(tl.int64)
+    batch_head_jump = (idx_batch * stride_B + idx_head * stride_H)
     Q_ptr += batch_head_jump
     K_ptr += batch_head_jump
     V_ptr += batch_head_jump
@@ -773,29 +761,36 @@ def attn_backward(
     dLdV_ptr += batch_head_jump
 
     # move pointers of (B, H, N) matrices to get to the correct batch and head
-    batch_head_jump = (idx_batch_head * N)#.to(tl.int64)
+    batch_head_jump = (idx_batch_head * N)
     M_ptr += batch_head_jump
     Delta_ptr += batch_head_jump
 
     ### STAGE 1: First we'll do dLdK and dLdV
     # in the fwd loop we held a block of Q in SRAM and iterated through K & V; here we'll do the opposite
+
+    # first we'l do the gradients along the block diagonal since they get treated differently
+    # in that they have an triangular causal mask
+    pid = tl.program_id(0)
     start_COL = pid * BLOCK_SIZE_COL_1
     start_ROW = start_COL # remember both rows & cols of length N in the NxN attention logits
+    # BLOCK_SIZE_COL_1 must be a multiple of BLOCK_SIZE_ROW_1
+    tl.static_assert(BLOCK_SIZE_COL_1 % BLOCK_SIZE_ROW_1 == 0)
+    # because we use them to determine num_steps and don't want a remainder
+    num_steps = BLOCK_SIZE_COL_1 // BLOCK_SIZE_ROW_1
+    
+    # load K & V
     offsets_COL_1 = start_COL + tl.arange(0, BLOCK_SIZE_COL_1)
     offsets_D = tl.arange(0, D)
+    KV_offsets = offsets_COL_1[:, None] * stride_N + offsets_D[None, :] * stride_D
+    K_block = tl.load(K_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
+    K_block *= scale * rln2
+    V_block = tl.load(V_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
 
     # accumulate the gradients into these
     dLdK_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
     dLdV_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
 
-    # load K & V
-    KV_offsets = offsets_COL_1[:, None] * stride_N + offsets_D[None, :] * stride_D
-    K_block = tl.load(K_ptr + KV_offsets) * rln2
-    V_block = tl.load(V_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
-
-    num_steps = BLOCK_SIZE_COL_1 // BLOCK_SIZE_ROW_1
-
-    # compute dLdK and dLdV for masked blocks
+    # compute dLdK and dLdV portions along the blocked diagonal
     dLdK, dLdV = _attn_backward_KV(
         K_block, V_block, 
         dLdK_block, dLdV_block,
@@ -809,7 +804,10 @@ def attn_backward(
         MASK=True
     )
 
-    start_ROW += num_steps * BLOCK_SIZE_ROW_1
+    # next we'll do all the blocks that don't need the triangular mask on the block-diagonal.
+    # this moves us forward to get off of the block-diagonal
+    start_ROW += BLOCK_SIZE_COL_1
+    # then we calculate how many blocks need to be done
     num_steps = (N - start_ROW) // (BLOCK_SIZE_ROW_1)
         # TODO use a ceiling above N since N isn't forced to be a multiple of 128
 
@@ -827,27 +825,34 @@ def attn_backward(
         MASK=False ###
     )
 
+    # we can scale here instead of at the K@Q_T because doing it here only requires one flop per entry
+    # whereas doing it there would be one flop for every time accumulation happens (so num_steps times)
+    dLdK *= scale
     # write back dLdK and dLdV
-    dLdK *= scale # TODO explain the weird scaling. weren't we supposed to not need to use scale bc it was done in Delta or something?
     tl.store(dLdK_ptr + KV_offsets, dLdK)
     tl.store(dLdV_ptr + KV_offsets, dLdV)
 
     ### STAGE 2: Now we do dLdQ
     # in this part, like the forward pass we look at a specific block of Q & iterate through K & V
-    start_ROW = pid * BLOCK_SIZE_ROW_2
-    end_COL = start_ROW + BLOCK_SIZE_ROW_2
-    offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW_2)
 
+    # we again start off doing the block-diagonal
+    start_ROW = pid * BLOCK_SIZE_ROW_2
+    start_COL = start_ROW
+    # BLOCK_SIZE_ROW_2 must be a multiple of BLOCK_SIZE_COL_2
+    tl.static_assert(BLOCK_SIZE_ROW_2 % BLOCK_SIZE_COL_2 == 0)
+    # because we use them to determine num_steps and don't want a remainder
+    num_steps = BLOCK_SIZE_ROW_2 // BLOCK_SIZE_COL_2
+
+    offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW_2)
     Q_offsets = offsets_ROW[:, None] * stride_N + offsets_D[None, :] * stride_D
     Q = tl.load(Q_ptr + Q_offsets) # shape (BLOCK_SIZE_ROW_2, D)
-    dLdQ = tl.zeros([BLOCK_SIZE_ROW_2, D], dtype=tl.float32)
     dLdO = tl.load(dLdO_ptr + Q_offsets) # dLdO shares the same shape as Q so it can use same offsets
     M = tl.load(M_ptr + offsets_ROW)[:, None] # shape (BLOCK_SIZE_ROW_2, 1)
 
+    # accumulate the gradients into here
+    dLdQ = tl.zeros([BLOCK_SIZE_ROW_2, D], dtype=tl.float32)
+
     # compute dQ for blocks on the diagonal
-    # TODO better understand the scanning structure & the comment at this same spot in attention_triton_docs.ppy
-    num_steps = BLOCK_SIZE_ROW_2 // BLOCK_SIZE_COL_2
-    start_COL = end_COL - num_steps * BLOCK_SIZE_COL_2
     dLdQ = _attn_backward_Q(
         dLdQ, Q, dLdO, M, 
         K_ptr, V_ptr, Delta_ptr, 
@@ -859,10 +864,10 @@ def attn_backward(
         MASK=True
     )
 
+    # now we'll do the parts that are not on the block-diagonal
     end_COL = start_COL
+    start_COL = 0 #end_COL - num_steps * BLOCK_SIZE_COL_2 # could just call it 0 lmao
     num_steps = end_COL // BLOCK_SIZE_COL_2
-    start_COL = end_COL - num_steps * BLOCK_SIZE_COL_2 # could just call it 0 lmao
-    # TODO why do "dLdQ = ..." when we could just call the kernel? does it do anything? Is it just to indicate what we're editing?
     dLdQ = _attn_backward_Q(
         dLdQ, Q, dLdO, M, 
         K_ptr, V_ptr, Delta_ptr, 
@@ -873,6 +878,5 @@ def attn_backward(
         rln2,
         MASK=False
     )
-    dLdQ *= ln2
+    dLdQ *= ln2 # TODO figure out & explain the ln2 stuff
     tl.store(dLdQ_ptr + Q_offsets, dLdQ)
-# test

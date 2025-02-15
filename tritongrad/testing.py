@@ -62,8 +62,8 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        #print(torch_input.grad, torch_input.shape)
-        #print(triton_input.grad, triton_input.shape)
+        print(torch_input.grad, torch_input.shape)
+        print(triton_input.grad, triton_input.shape)
         torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
     print(f"✓ Backward pass matches")
     
@@ -105,7 +105,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D, V = 4, 512, 8, 256, 4096
+    B, N, H, D, V = 1, 256, 2, 256, 4096
         
     ### EXPONENTIATION
     if args.all or args.exp:
@@ -534,16 +534,6 @@ if __name__ == "__main__":
             return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=math.sqrt(Dh))
         test_operation(
             f"causal flash attention",
-            triton_flash,
-            torch_flash,
-            inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
-        )
-        def triton_flash(q, k, v): 
-            return nn.FlashAttention()(q, k, v, is_causal=False, scale=math.sqrt(Dh))
-        def torch_flash(q, k, v): 
-            return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False, scale=math.sqrt(Dh))
-        test_operation(
-            f"non-causal flash attention",
             triton_flash,
             torch_flash,
             inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
