@@ -296,7 +296,7 @@ class FlashAttention(Module):
                 N, D,
             )
 
-            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 16, 32 # TODO make these autotuned
+            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 16, 32 # TODO make these autotuned & combined
             BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2 = 32, 16
             grid = (N // BLOCK_SIZE_ROW_1, B * H)
             modules.attn_backward[grid](
