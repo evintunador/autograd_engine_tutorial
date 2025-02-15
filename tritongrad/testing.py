@@ -105,7 +105,7 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    B, N, H, D, V = 1, 256, 2, 256, 4096
+    B, N, H, D, V = 1, 128, 2, 128, 4096
         
     ### EXPONENTIATION
     if args.all or args.exp:

@@ -373,16 +373,16 @@ def attn_fwd(
     # in order to use tl.exp2 later isntead of tl.exp (the former is faster) we need to scale our scale
     rln2: tl.constexpr = 1.4426950408889634
     softmax_scale *= rln2
-
+    
     # as opposed to regular assert, static_assert occurs at compile-time
     tl.static_assert(BLOCK_SIZE_KV <= D)
         # D is usually relatively small (128 or 256) so it wouldn't make sense to parallelize within it
 
     # This indicates which block in the sequence length to process
     block_index_q = tl.program_id(0)
-
     # This indicates which head and batch to process. Each program is associated with a single head of a single batch
     index_batch_head = tl.program_id(1)
+    #print_if(f'index_batch_head = {index_batch_head} | block_index_q = {block_index_q}', '')
     # This indicates which batch this program is associated with (each batch has H heads)
     index_batch = index_batch_head // H
     # This indicates the position of the head in the batch
