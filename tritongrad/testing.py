@@ -11,12 +11,119 @@ device = torch.device(f'cuda:{torch.cuda.current_device()}')
 from engine import TritonTensor
 import nn
 
+# --- New helper functions for heatmap visualization ---
+
+def clear_heatmap_folder(folder: str = "heatmaps"):
+    """
+    Deletes the folder (if it exists) and then re-creates an empty version.
+    """
+    import os, shutil
+    if os.path.exists(folder):
+        shutil.rmtree(folder)
+    os.makedirs(folder)
+
+
+def save_heatmaps(torch_tensor: torch.Tensor, triton_tensor: torch.Tensor, test_name: str,
+                  folder: str = "heatmaps", atol: float = 1e-3, rtol: float = 1e-3,
+                  phase: str = "backward"):
+    """
+    Saves multiple sets of heatmaps comparing torch_tensor and triton_tensor:
+      1) Raw absolute differences
+      2) Absolute tolerance failure mask (where abs diff > atol)
+      3) Relative tolerance failure mask (where abs diff > rtol * abs(expected))
+      4) Combined tolerance failure mask (where abs diff > atol + rtol * abs(expected))
+    
+    Handles different tensor dimensions:
+      4D: (batch_size, num_heads, seq_len, head_dim) -> one set per batch/head
+      3D: (batch_size, seq_len, model_dim) -> one set per batch
+      2D: (batch_size, model_dim) -> one set per batch
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # Convert to numpy arrays
+    actual = triton_tensor.detach().cpu().numpy()
+    expected = torch_tensor.detach().cpu().numpy()
+    
+    # Compute differences and masks
+    abs_diff = np.abs(expected - actual)
+    abs_threshold = atol
+    rel_threshold = rtol * np.abs(expected)
+    combined_threshold = atol + rtol * np.abs(expected)
+    
+    abs_fail_mask = (abs_diff > abs_threshold).astype(np.int32)
+    rel_fail_mask = (abs_diff > rel_threshold).astype(np.int32)
+    combined_fail_mask = (abs_diff > combined_threshold).astype(np.int32)
+    
+    def save_figure(matrix, title: str, filename: str, cmap: str = "hot"):
+        plt.figure(figsize=(8, 6))
+        plt.imshow(matrix, cmap=cmap, aspect="auto")
+        plt.title(title)
+        plt.xlabel("Model/Head Dimension")
+        plt.ylabel("Sequence Position" if matrix.ndim > 1 else "Batch")
+        plt.colorbar()
+        plt.savefig(os.path.join(folder, filename))
+        plt.close()
+    
+    def save_all_figures(diff: np.ndarray, abs_mask: np.ndarray, rel_mask: np.ndarray, 
+                        comb_mask: np.ndarray, suffix: str, filename_suffix: str):
+        # Raw difference
+        save_figure(diff, f"{test_name} {suffix} - raw diff ({phase})",
+                   f"{test_name}_{filename_suffix}_raw_diff_{phase}.png")
+        # Absolute tolerance failures
+        save_figure(abs_mask, f"{test_name} {suffix} - abs failure mask ({phase})",
+                   f"{test_name}_{filename_suffix}_abs_fail_{phase}.png", cmap="Reds")
+        # Relative tolerance failures
+        save_figure(rel_mask, f"{test_name} {suffix} - rel failure mask ({phase})",
+                   f"{test_name}_{filename_suffix}_rel_fail_{phase}.png", cmap="Reds")
+        # Combined tolerance failures
+        save_figure(comb_mask, f"{test_name} {suffix} - combined failure mask ({phase})",
+                   f"{test_name}_{filename_suffix}_comb_fail_{phase}.png", cmap="Reds")
+
+    # Handle different tensor dimensions
+    if expected.ndim == 4:  # (batch_size, num_heads, seq_len, head_dim)
+        B, H, N, D = expected.shape
+        for b in range(B):
+            for h in range(H):
+                save_all_figures(
+                    abs_diff[b, h], abs_fail_mask[b, h],
+                    rel_fail_mask[b, h], combined_fail_mask[b, h],
+                    f"diff: batch {b} head {h}", f"diff_b{b}_h{h}"
+                )
+    elif expected.ndim == 3:  # (batch_size, seq_len, model_dim)
+        B, N, D = expected.shape
+        for b in range(B):
+            save_all_figures(
+                abs_diff[b], abs_fail_mask[b],
+                rel_fail_mask[b], combined_fail_mask[b],
+                f"diff: batch {b}", f"diff_b{b}"
+            )
+    elif expected.ndim == 2:  # (batch_size, model_dim)
+        B, D = expected.shape
+        save_all_figures(
+            abs_diff, abs_fail_mask,
+            rel_fail_mask, combined_fail_mask,
+            "diff", "diff"
+        )
+    else:
+        # Fallback for other shapes
+        save_all_figures(
+            abs_diff, abs_fail_mask,
+            rel_fail_mask, combined_fail_mask,
+            "diff", "diff"
+        )
+
+
+# --- End of heatmap helper functions ---
+
+
 def test_operation(op_name: str,
-                  triton_fn,
-                  torch_fn,
-                  inputs_list: list[torch.Tensor],
-                  atol=1e-3,
-                  rtol=1e-3):
+                   triton_fn,
+                   torch_fn,
+                   inputs_list: list[torch.Tensor],
+                   atol=1e-3,
+                   rtol=1e-3):
     """
     Test TritonTensor operations against PyTorch for correctness.
     
@@ -35,17 +142,24 @@ def test_operation(op_name: str,
     triton_inputs = [TritonTensor(x, requires_grad=x.requires_grad) for x in inputs_list]
     
     # Forward pass
-    #with torch.autocast(device_type='cuda', dtype=torch.float32):
     torch_out = torch_fn(*torch_inputs)
     torch_out = torch_out[0] if op_name[:3] in ("min", "max") else torch_out
         # TODO do we need our max op to also give indices? i think so for inference
     triton_out = triton_fn(*triton_inputs)
     
+    # Clear out previous heatmaps before any testing
+    clear_heatmap_folder("heatmaps")
+    
     # Check forward pass
-    #print(torch_out)
-    #print(triton_out)
-    torch.testing.assert_close(torch_out, triton_out.data, atol=atol, rtol=float("inf"))
-    print(f"✓ Forward pass matches")
+    try:
+        torch.testing.assert_close(torch_out, triton_out.data, atol=atol, rtol=rtol)
+        print(f"✓ Forward pass matches")
+    except AssertionError as error:
+        print(f"Forward pass mismatch detected in operation '{op_name}'.")
+        print("Generating heatmaps of the output differences...")
+        save_heatmaps(torch_out, triton_out.data, f"{op_name}_output",
+                      folder="heatmaps", atol=atol, rtol=rtol, phase="forward")
+        raise error
     
     # before computing the backward pass, we need to let the autotuner run.
     # this needs to be done bc otherwise the gradient accumulation of each run would compound
@@ -62,9 +176,16 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        print(torch_input.grad, torch_input.shape)
-        print(triton_input.grad, triton_input.shape)
-        torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
+        print(f"Analyzing gradient for input tensor index {i} with shape {torch_input.grad.shape}...")
+        try:
+            torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
+        except AssertionError as error:
+            print(f"{'#'*20}\ntensor {i} in input gradients list\n{'#'*20}")
+            print(f"Gradient mismatch detected for input {i} in operation '{op_name}'.")
+            print("Generating heatmaps of the gradient differences...")
+            save_heatmaps(torch_input.grad, triton_input.grad, f"{op_name}_input{i}",
+                          folder="heatmaps", atol=atol, rtol=rtol, phase="backward")
+            raise error
     print(f"✓ Backward pass matches")
     
 

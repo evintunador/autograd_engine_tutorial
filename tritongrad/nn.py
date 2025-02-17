@@ -4,7 +4,7 @@ import triton.language as tl
 import math
 
 from engine import TritonTensor, Parameter
-from kernels import modules
+from kernels import modules, flash_attention
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 properties = triton.runtime.driver.active.utils.get_device_properties(DEVICE.index)
@@ -260,7 +260,7 @@ class FlashAttention(Module):
             triton.cdiv(N, args["BLOCK_SIZE_Q"]), # primary parallelizatoin is across sequence length
             B * H, # parallelize across the dimensions that don't matter
         )
-        modules.attn_fwd[grid](
+        flash_attention.attn_fwd[grid](
             Q.data, K.data, V.data, M, O,
             scale,
             Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3),
@@ -291,23 +291,21 @@ class FlashAttention(Module):
             pre_grid = lambda meta: (N // meta["PRE_BLOCK_SIZE_ROW"], B * H)
                 # in this case, we want the parallelizations along the N dimension to be near each other so they can
                 #  share data, while parallelization across batches & heads don't necessitate any sharing
-            modules.attn_backward_preprocess[pre_grid](
+            flash_attention.attn_backward_preprocess[pre_grid](
                 out.data, out.grad, Delta,
                 N, D,
             )
 
-            BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1 = 16, 32 # TODO make these autotuned & combined
-            BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2 = 32, 16
-            grid = (N // BLOCK_SIZE_ROW_1, B * H)
-            modules.attn_backward[grid](
+            BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO = 16, 32 # TODO make these autotuned
+            grid = (N // BLOCK_SIZE_MACRO, B * H) # TODO make this robust to sequence lengths that are not a multiple of BLOCK_SIZE_COL_1
+            flash_attention.attn_backward[grid](
                 Q.data, K.data, V.data,
                 out.grad, Q.grad, K.grad, V.grad,
                 M, Delta,
                 scale,
                 Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
                 H, N, D,
-                BLOCK_SIZE_ROW_1=BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1=BLOCK_SIZE_COL_1, # for the first sub-kernel 
-                BLOCK_SIZE_ROW_2=BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2=BLOCK_SIZE_COL_2, # for the second sub-kernel
+                BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO, 
             )
         out._backward = _backward
 
