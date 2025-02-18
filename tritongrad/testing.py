@@ -650,7 +650,7 @@ if __name__ == "__main__":
             return [torch.randn(size=shape, dtype=torch.float32, device=device, requires_grad=True) * 0.02
                     for shape in input_shapes]
         def triton_flash(q, k, v): 
-            return nn.FlashAttention()(q, k, v, is_causal=True, scale=math.sqrt(Dh))
+            return nn.FlashAttention()(q, k, v, scale=math.sqrt(Dh))
         def torch_flash(q, k, v): 
             return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=math.sqrt(Dh))
         test_operation(

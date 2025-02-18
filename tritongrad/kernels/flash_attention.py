@@ -4,6 +4,16 @@ import triton.language as tl
 
 DEVICE = torch.device(f'cuda:{torch.cuda.current_device()}')
 
+"""
+this implementation of flash-attention only supports a causal mask, no other masks or lack of a mask
+the forward pass is based primarily on the pseudocode from the two original papers
+https://arxiv.org/abs/2205.14135
+https://arxiv.org/abs/2307.08691
+and the backward passs is based primarily on the triton documentation implementation since it's 
+significantly faster than the pseudocode from the original papers
+https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#sphx-glr-getting-started-tutorials-06-fused-attention-py
+"""
+
 @triton.jit
 def _attn_fwd_inner(
     O_block,
@@ -18,23 +28,20 @@ def _attn_fwd_inner(
     #stride_V_seq, # in the automatic implementation relevant stride lengths are saved in the pointer object
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    CAUSAL: tl.constexpr,
     DIAGONAL: tl.constexpr,
     offsets_q: tl.constexpr,
     offsets_kv: tl.constexpr,
     N: tl.constexpr,
 ):
-    # range of values handled by this stage
-    if CAUSAL and DIAGONAL:
-        # Used only for the block in which there is transition between non-masked and masked keys
+    if DIAGONAL:
+        # Used only for the blocks along the diagonal in which there is transition between non-masked and masked keys
         lo = block_index_q * BLOCK_SIZE_Q
         hi = (block_index_q + 1) * BLOCK_SIZE_Q
         # let the compiler know lo is a muliple of BLOCK_SIZE_Q to speed things up
         lo = tl.multiple_of(lo, BLOCK_SIZE_Q) # TODO not sure why this doesn't also help with hi
-    elif CAUSAL: # any blocks in the causal mask below the diagonal
+    else: 
+        # this part is for any blocks in the causal mask below the diagonal
         lo, hi = 0, block_index_q * BLOCK_SIZE_Q
-    else: # runs on every single block for the case that we're not using a causal mask
-        lo, hi = 0, N
 
     K_T_block_ptrs = tl.advance(K_T_block_ptrs, (0, lo)) # tuple because you choose which dimension to advance
     V_block_ptrs = tl.advance(V_block_ptrs, (lo, 0))
@@ -55,7 +62,7 @@ def _attn_fwd_inner(
         K_T_block = tl.load(K_T_block_ptrs)
         QK_block = tl.dot(Q_block, K_T_block) * softmax_scale # becomes shape (BLOCK_SIZE_Q, BLOCK_SIZE_KV)
 
-        if CAUSAL and DIAGONAL: # if causal mask and we're currently on a block containing the diagonal
+        if DIAGONAL: # if we're currently on a block containing the diagonal
             mask = offsets_q[:, None] >= (start_kv + offsets_kv[None, :])
             QK_block += tl.where(mask, 0, -1.0e6)
         
@@ -126,15 +133,16 @@ def attn_fwd(
     # meta-parameters (decided at compile-time)
     H: tl.constexpr, N: tl.constexpr, 
     D: tl.constexpr, # should always be a power of 2, and really 128 and 256 are the only reasonable options
-    CAUSAL: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr, BLOCK_SIZE_KV: tl.constexpr,
 ):
     """
-    this implementation of the flash-attention forward pass was created entirely from the psuedocode in the two papers
+    this implementation of the flash-attention forward pass was created primarily from the psuedocode in the two papers
     https://arxiv.org/abs/2205.14135
     https://arxiv.org/abs/2307.08691
+    plus some optimizations from the Triton docs implementation
+    https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#sphx-glr-getting-started-tutorials-06-fused-attention-py
     """
-    # in order to use tl.exp2 later isntead of tl.exp (the former is faster) we need to scale our scale
+    # in order to use tl.exp2 later isntead of tl.exp (the former is faster) we need to scale our softmax scale by ln2
     rln2: tl.constexpr = 1.4426950408889634
     softmax_scale *= rln2
     
@@ -258,8 +266,8 @@ def attn_fwd(
     # load the blocks of Q: it will stay in SRAM throughout
     Q_block = tl.load(Q_block_ptrs) # shape (BLOCK_SIZE_Q, D)
 
-    # calculate attention for dense blocks (those where the mask if full of 1's). This step runs for 
-    # the entirety of non-causal attention and for the blocks below the diagonal in causal attention
+    # calculate attention for dense blocks (those where the mask if full of 1's). 
+    # This step runs for the blocks below the diagonal in causal attention
     O_block, l_i, m_i = _attn_fwd_inner(
         O_block,
         l_i,
@@ -273,33 +281,31 @@ def attn_fwd(
         #stride_V_seq, # in the automatic implementation relevant stride lengths are saved in the pointer object
         BLOCK_SIZE_Q,
         BLOCK_SIZE_KV,
-        CAUSAL,
         False, # blocks on the DIAGONAL get special treatment if this is set to true; we use it below
         offsets_q,
         offsets_kv,
         N,
     )
 
-    if CAUSAL: # This step runs for the blocks on the diagonal in the causal attention mask
-        O_block, l_i, m_i = _attn_fwd_inner(
-            O_block,
-            l_i,
-            m_i,
-            Q_block,
-            K_T_block_ptrs,
-            V_block_ptrs,
-            block_index_q,
-            softmax_scale,
-            #stride_K_seq, # if you go for a manual pointer implementation then you'll need to pass in these strides.
-            #stride_V_seq, # in the automatic implementation relevant stride lengths are saved in the pointer object
-            BLOCK_SIZE_Q,
-            BLOCK_SIZE_KV,
-            CAUSAL,
-            True, # blocks on the diagonal get special masking treatment
-            offsets_q,
-            offsets_kv,
-            N,
-        )
+    # This step runs for the blocks on the diagonal in the causal attention mask
+    O_block, l_i, m_i = _attn_fwd_inner(
+        O_block,
+        l_i,
+        m_i,
+        Q_block,
+        K_T_block_ptrs,
+        V_block_ptrs,
+        block_index_q,
+        softmax_scale,
+        #stride_K_seq, # if you go for a manual pointer implementation then you'll need to pass in these strides.
+        #stride_V_seq, # in the automatic implementation relevant stride lengths are saved in the pointer object
+        BLOCK_SIZE_Q,
+        BLOCK_SIZE_KV,
+        True, # blocks on the diagonal get special masking treatment
+        offsets_q,
+        offsets_kv,
+        N,
+    )
     
     # finally dividing by the denominator of our softmax.
     # notice we've already multiplied by V to get O, so this was done out-of-order from naive softmax implementations

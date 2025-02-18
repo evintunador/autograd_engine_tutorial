@@ -242,7 +242,6 @@ class FlashAttention(Module):
         Q: TritonTensor,
         K: TritonTensor,
         V: TritonTensor,
-        is_causal: bool = False,
         scale: float = None,
     ):
         assert Q.shape == K.shape == V.shape
@@ -268,7 +267,6 @@ class FlashAttention(Module):
             V.data.stride(0), V.data.stride(1), V.data.stride(2), V.data.stride(3),
             O.stride(0), O.stride(1), O.stride(2), O.stride(3),
             B, H, N, D,
-            is_causal,
         )
 
         # wrap output in a triton tensor to add it to our graph
