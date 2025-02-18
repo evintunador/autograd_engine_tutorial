@@ -125,13 +125,14 @@ def _attn_fwd_inner(
 @triton.jit
 def attn_fwd(
     Q_ptr, K_ptr,  V_ptr,  # each shape (B, H, N, Dh)
-    M_ptr,  # shape (B, H, N). here we first store the max values of each row & later the logsumexp trick 
     O_ptr,  # shape (B, H, N, Dh). where we store the final output
+    LSE_ptr,  # shape (B, H, N). here we first store the max values of each row & later the logsumexp trick 
     softmax_scale,
     stride_Q_B, stride_Q_H, stride_Q_N, stride_Q_Dh, # dist to move thru mem to next entry in that dim of that tensor
     stride_K_B, stride_K_H, stride_K_N, stride_K_Dh,
     stride_V_B, stride_V_H, stride_V_N, stride_V_Dh,
     stride_O_B, stride_O_H, stride_O_N, stride_O_Dh,
+    stride_LSE_B, stride_LSE_H, stride_LSE_N,
     B, # unlike other tensor dimensions, batch size needs to be flexible for runtime differences
     # meta-parameters (decided at compile-time)
     H: tl.constexpr, N: tl.constexpr, 
@@ -245,9 +246,9 @@ def attn_fwd(
         #  that we of course don't plan to use
 
     ## storing it all back to DRAM
-    # we're using the input tensor M to store the LSE
-    M_offsets = index_BH * N + offsets_QO_N
-    tl.store(M_ptr + M_offsets, LSE, mask=M_offsets < N)
+    LSE_offsets = index_BH * stride_LSE_H + offsets_QO_N
+    LSE_mask = block_index_QO * BLOCK_SIZE_QO + tl.arange(0, BLOCK_SIZE_QO) < N
+    tl.store(LSE_ptr + LSE_offsets, LSE, mask=LSE_mask)
         # the mask prevents us from saving the useless log_2(n) values at the bottom of LSE
     O_offsets = (offsets_QO_N[:, None] * stride_O_N + offsets_Dh[None, :] * stride_O_Dh)
         # shape (BLOCK_SIZE_Q, Dh)
