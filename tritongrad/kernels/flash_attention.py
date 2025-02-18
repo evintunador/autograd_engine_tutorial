@@ -304,9 +304,9 @@ def attn_backward_preprocess(
 def _attn_backward_KV(
     K, V, dLdK, dLdV,               # shape (BLOCK_SIZE_COL, D)
     Q_ptr, dLdO_ptr,
-    M_ptr, Delta_ptr, 
-    stride_N, stride_D,
-    H, N, D: tl.constexpr,
+    LSE_ptr, Delta_ptr, 
+    stride_N, stride_Dh,
+    H, N, Dh: tl.constexpr,
     BLOCK_SIZE_ROW: tl.constexpr,   # no more _1 because this sub-kernel is the _1
     BLOCK_SIZE_COL: tl.constexpr, 
     start_ROW, start_COL, num_steps,
@@ -324,40 +324,47 @@ def _attn_backward_KV(
     N of Q     |    |   |   |   |
                |    |   |   |   |
               \|/  \|/ \|/ \|/ \|/
-    arrows indicate direction of our for loop; each arrow is a different PID
+    arrows indicate direction of this pid's for loop; each arrow is a different PID
     """
     offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
     offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
-    offsets_D = tl.arange(0, D)
+    offsets_Dh = tl.arange(0, Dh)
 
     # we transpose Q while loading it rather than in a separate kernel
-    Q_T_ptrs = Q_ptr        + offsets_D[:, None] * stride_D     + offsets_ROW[None, :] * stride_N
-    dLdO_ptrs = dLdO_ptr    + offsets_ROW[:, None] * stride_N   + offsets_D[None, :] * stride_D
+    Q_T_offsets = offsets_Dh[:, None] * stride_Dh + offsets_ROW[None, :] * stride_N
+    dLdO_offsets = offsets_ROW[:, None] * stride_N + offsets_Dh[None, :] * stride_Dh
 
     for block_idx in range(num_steps):
         # we load M before computing S to reduce pipeline stall (and dLdO before computing dLdV)
         # meaning the Triton compiler can have an easier time doing the loading of M
         # and the dot product of K and QT simultaneously. in general you should load a bunch
         # of stuff then calc a bunch of stuff rather than flipping b/w loads and calcs
-        Q_T = tl.load(Q_T_ptrs) # shape (D, BLOCK_SIZE_ROW)
-        M = tl.load(M_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
-        dLdO = tl.load(dLdO_ptrs) # shape (BLOCK_SIZE_ROW, D)
-        Delta = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIZE_ROW)
-        # ^ notice the order i load these in is based on the order we use them below
+        mask_N = offsets_ROW < N
+        Q_T = tl.load(Q_ptr + Q_T_offsets, mask=mask_N[None, :], other=0.) # shape (Dh, BLOCK_SIZE_ROW)
+        LSE = tl.load(LSE_ptr + offsets_ROW, mask=mask_N, other=0.) # shape (BLOCK_SIZE_ROW)
+        dLdO = tl.load(dLdO_ptr + dLdO_offsets, mask=mask_N[:, None], other=0.) # shape (BLOCK_SIZE_ROW, Dh)
+        Delta = tl.load(Delta_ptr + offsets_ROW, mask=mask_N, other=0.) # shape (BLOCK_SIZE_ROW)
+        # ^notice the order we load these in is based on the order we use them below
 
-        # calculate transpose of S and P matrices
+        # we'll re-calculate transpose of S and P matrices since doing that here is faster & more importantly
+        #  cheaper on memory consumption than if we were to have saved them in our forward pass & read them here
         S_T = tl.dot(K, Q_T) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
             # no scale here because the operation is associative so we did it earlier on K
-        P_T = tl.exp2(S_T - M[None, :]) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
+            # thanks to masking of K & Q_T, the non-existent out-of-bounds tokens look like a bunch
+            #  of zeros hugged up against the bottom and right edges of S_T
+        # subtract S_T by the logsumexp then exponentiate to get P_T
+        P_T = tl.exp2(S_T - LSE[None, :]) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
             # this derivative actually requires an extra *ln(2) which we do below at dLdS_T
+            # the non-existent tokens that were a bunch of 0's are now a bunch of 1's
 
         if MASK: # if we're on the block-diagonal
-            # weird shape here with columns on the rows and rows on the columns bc of transpose
+            # implement a lower-triangular mask. it looks like upper-triangular because we've 
+            #  transposed, which is also the reason why our columns & rows are reversed
             mask = (offsets_COL[:, None] <= offsets_ROW[None, :]) # (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
             P_T = tl.where(mask, P_T, 0.)
 
         # compute dLdV
-        dLdV = tl.dot(P_T, dLdO, acc=dLdV) # shape (BLOCK_SIZE_COL, D)
+        dLdV = tl.dot(P_T, dLdO, acc=dLdV) # shape (BLOCK_SIZE_COL, Dh)
 
         # compute dLdP_T and dLdS_T to get dLdK
         dLdP_T = tl.dot(V, tl.trans(dLdO)) # shape (BLOCK_SIZE_COL, BLOCK_SIZE_ROW)
@@ -367,18 +374,18 @@ def _attn_backward_KV(
 
         # increment pointers
         offsets_ROW += BLOCK_SIZE_ROW
-        Q_T_ptrs += BLOCK_SIZE_ROW * stride_N
-        dLdO_ptrs += BLOCK_SIZE_ROW * stride_N
+        Q_ptr += BLOCK_SIZE_ROW * stride_N
+        dLdO_ptr += BLOCK_SIZE_ROW * stride_N
     
     return dLdK, dLdV
 
 
 @triton.jit
 def _attn_backward_Q(
-    dLdQ, Q, dLdO, M, 
+    dLdQ, Q, dLdO, LSE, 
     K_ptr, V_ptr, Delta_ptr,
-    stride_N, stride_D,
-    H, N, D: tl.constexpr,
+    stride_N, stride_Dh,
+    H, N, Dh: tl.constexpr,
     BLOCK_SIZE_ROW: tl.constexpr, 
     BLOCK_SIZE_COL: tl.constexpr,
     start_ROW, start_COL, num_steps,
@@ -398,26 +405,24 @@ def _attn_backward_Q(
     N of Q     ------------------->
                ------------------->
                ------------------->
-    arrows indicate direction of our for loop; each arrow is a different PID
+    arrows indicate direction of this pid's for loop; each arrow is a different PID
     """
     offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW)
     offsets_COL = start_COL + tl.arange(0, BLOCK_SIZE_COL)
-    offsets_D = tl.arange(0, D)
+    offsets_Dh = tl.arange(0, Dh)
 
     # we transpose V while loading it
-    K_and_V_T_offsets = offsets_COL[None, :] * stride_N + offsets_D[:, None] * stride_D
-    K_T_ptrs = K_ptr + K_and_V_T_offsets
-    V_T_ptrs = V_ptr + K_and_V_T_offsets
+    K_and_V_T_offsets = offsets_COL[None, :] * stride_N + offsets_Dh[:, None] * stride_Dh
 
-    Delta = tl.load(Delta_ptr + offsets_ROW) # shape (BLOCK_SIE_ROW)
+    Delta = tl.load(Delta_ptr + offsets_ROW, mask=offsets_ROW<N, other=0.) # shape (BLOCK_SIE_ROW)
 
     for block_idx in range(num_steps):
-        K_T = tl.load(K_T_ptrs) # shape (BLOCK_SIZE_COL, D)
-        V_T = tl.load(V_T_ptrs) # shape (BLOCK_SIZE_COL, D)
+        K_T = tl.load(K_ptr + K_and_V_T_offsets, mask=(offsets_COL < N)[None, :], other=0.) # shape (BLOCK_SIZE_COL, Dh)
+        V_T = tl.load(V_ptr + K_and_V_T_offsets, mask=(offsets_COL < N)[None, :], other=0.) # shape (BLOCK_SIZE_COL, Dh)
 
         S = tl.dot(Q, K_T) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
             # no scale here because the operation is associative so we did it earlier on Q
-        P = tl.exp2(S - M) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+        P = tl.exp2(S - LSE) # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
 
         if MASK: # if we're on the block-diagonal
             mask = (offsets_ROW[:, None] >= offsets_COL[None, :]) # (BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
@@ -437,8 +442,8 @@ def _attn_backward_Q(
         
         # increment pointers
         offsets_COL += BLOCK_SIZE_COL
-        K_T_ptrs += BLOCK_SIZE_COL * stride_N
-        V_T_ptrs += BLOCK_SIZE_COL * stride_N
+        K_ptr += BLOCK_SIZE_COL * stride_N
+        V_ptr += BLOCK_SIZE_COL * stride_N
     
     return dLdQ
 
@@ -459,10 +464,10 @@ def _attn_backward_Q(
 def attn_backward(
     Q_ptr, K_ptr, V_ptr, 
     dLdO_ptr, dLdQ_ptr, dLdK_ptr, dLdV_ptr,
-    M_ptr, Delta_ptr,
+    LSE_ptr, Delta_ptr,
     scale,
-    stride_B, stride_H, stride_N, stride_D,
-    H, N, D: tl.constexpr, 
+    stride_B, stride_H, stride_N, stride_Dh,
+    H, N, Dh: tl.constexpr, 
     BLOCK_SIZE_MICRO: tl.constexpr,  #
     BLOCK_SIZE_MACRO: tl.constexpr,  #
 ):
@@ -478,7 +483,6 @@ def attn_backward(
     rln2: tl.constexpr = 1.4426950408889634  # = 1.0 / ln(2), the reciprocal of the natural logarithm of 2
         # generally defining a known constant as an approximation of itself to some number of digits
         #  is more efficient than calculating the actual value every time
-    # TODO explain how/why we use these
 
     # move pointers of (B, H, N, D) matrices to get to the correct batch and head
     idx_batch_head = tl.program_id(1)
@@ -495,7 +499,7 @@ def attn_backward(
 
     # move pointers of (B, H, N) matrices to get to the correct batch and head
     batch_head_jump = idx_batch_head * N
-    M_ptr += batch_head_jump
+    LSE_ptr += batch_head_jump
     Delta_ptr += batch_head_jump
 
     # BLOCK_SIZE_MACRO must be a multiple of BLOCK_SIZE_MICRO
@@ -505,7 +509,7 @@ def attn_backward(
     ### STAGE 1: First we'll do dLdK and dLdV
     # in the fwd loop we held a block of Q in SRAM and iterated through K & V; here we'll do the opposite
 
-    # ROW and COL refer to the N dimension of Q and K/V respectively
+    # ROW and COL refer to the N dimension of (Q & O) and (K & V) respectively
     # for stage 1 each PID will look at BLOCK_SIZE_MACRO tokens of K & V and there will 
     #  be an inner for-loop iterating over BLOCK_SIZE_MICRO tokens of Q at a time
     BLOCK_SIZE_ROW_1: tl.constexpr = BLOCK_SIZE_MICRO
@@ -520,28 +524,28 @@ def attn_backward(
     
     # load K & V
     offsets_COL_1 = start_COL + tl.arange(0, BLOCK_SIZE_COL_1)
-    offsets_D = tl.arange(0, D)
-    KV_offsets = offsets_COL_1[:, None] * stride_N + offsets_D[None, :] * stride_D
-    K_block = tl.load(K_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
+    offsets_Dh = tl.arange(0, Dh)
+    KV_offsets = offsets_COL_1[:, None] * stride_N + offsets_Dh[None, :] * stride_Dh
+    KV_mask = (offsets_COL_1[:, None] < N) # to avoid out-of-bounds non-existent tokens
+    K = tl.load(K_ptr + KV_offsets, mask=KV_mask, other=0.) # shape (BLOCK_SIZE_COL_1, Dh)
+    V = tl.load(V_ptr + KV_offsets, mask=KV_mask, other=0.) # shape (BLOCK_SIZE_COL_1, Dh)
+
     # pre-scaling K allows us to do the multiplication once here as opposed to
     #  num_steps times inside _attn_backward_KV
     # we also scale by rln2 to account for the derivative of tl.exp2() and do it
     #  here instead of inside _attn_backward_KV for the same reason
-    K_block *= scale * rln2
-    V_block = tl.load(V_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
+    K *= scale * rln2
 
     # we'll accumulate the gradients into these
-    dLdK = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
-    dLdV = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
+    dLdK = tl.zeros([BLOCK_SIZE_COL_1, Dh], dtype=tl.float32)
+    dLdV = tl.zeros([BLOCK_SIZE_COL_1, Dh], dtype=tl.float32)
 
     # compute dLdK and dLdV portions along the blocked diagonal
     dLdK, dLdV = _attn_backward_KV(
-        K_block, V_block, 
-        dLdK, dLdV,
-        Q_ptr, dLdO_ptr,
-        M_ptr, Delta_ptr,
-        stride_N, stride_D,
-        H, N, D,
+        K, V, dLdK, dLdV,
+        Q_ptr, dLdO_ptr, LSE_ptr, Delta_ptr,
+        stride_N, stride_Dh,
+        H, N, Dh,
         BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
         start_ROW, start_COL, num_steps,
         scale, ln2, rln2,
@@ -552,18 +556,17 @@ def attn_backward(
     # this moves us forward to get off of the block-diagonal
     start_ROW += BLOCK_SIZE_COL_1
         # start_COL doesn't change since that's determined by our PID
-    # then we calculate how many blocks need to be done
-    num_steps = (N - start_ROW) // BLOCK_SIZE_ROW_1
-        # TODO use a ceiling above N since N isn't forced to be a multiple of 128
+    # then we calculate how many blocks need to be done. 
+    # this adjustment to N accounts for sequence lengths that are not clean multiples of BLOCK_SIZE_COL_1
+    N_adj = tl.cdiv(N, BLOCK_SIZE_COL_1) * BLOCK_SIZE_COL_1
+    num_steps = (N_adj - start_ROW) // BLOCK_SIZE_ROW_1
 
     # compute dLdK and dLdV for non-masked blocks
     dLdK, dLdV = _attn_backward_KV(
-        K_block, V_block, 
-        dLdK, dLdV,
-        Q_ptr, dLdO_ptr,
-        M_ptr, Delta_ptr,
-        stride_N, stride_D,
-        H, N, D,
+        K, V, dLdK, dLdV,
+        Q_ptr, dLdO_ptr, LSE_ptr, Delta_ptr,
+        stride_N, stride_Dh,
+        H, N, Dh,
         BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
         start_ROW, start_COL, num_steps,
         scale, ln2, rln2,
@@ -573,8 +576,8 @@ def attn_backward(
     # scale since we didn't do it inside _attn_backward_KV to save flops
     dLdK *= scale * rln2
     # write back dLdK and dLdV
-    tl.store(dLdK_ptr + KV_offsets, dLdK)
-    tl.store(dLdV_ptr + KV_offsets, dLdV)
+    tl.store(dLdK_ptr + KV_offsets, dLdK, mask=KV_mask)
+    tl.store(dLdV_ptr + KV_offsets, dLdV, mask=KV_mask)
 
     ### STAGE 2: Now we do dLdQ
     # in this part, like the forward pass we look at a specific block of Q & iterate through K & V
@@ -588,28 +591,26 @@ def attn_backward(
     # we again start off doing the block-diagonal
     start_ROW = pid * BLOCK_SIZE_ROW_2
     start_COL = start_ROW
-    # BLOCK_SIZE_ROW_2 must be a multiple of BLOCK_SIZE_COL_2
-    tl.static_assert(BLOCK_SIZE_ROW_2 % BLOCK_SIZE_COL_2 == 0)
-    # because we use them to determine num_steps and don't want a remainder
     num_steps = BLOCK_SIZE_ROW_2 // BLOCK_SIZE_COL_2
     # ^this is number of steps for a single block, aka the blocks on the diagonal
 
     offsets_ROW = start_ROW + tl.arange(0, BLOCK_SIZE_ROW_2)
-    Q_offsets = offsets_ROW[:, None] * stride_N + offsets_D[None, :] * stride_D
-    Q = tl.load(Q_ptr + Q_offsets) # shape (BLOCK_SIZE_ROW_2, D)
+    QO_offsets = offsets_ROW[:, None] * stride_N + offsets_Dh[None, :] * stride_Dh
+    mask_ROW = offsets_ROW < N
+    Q = tl.load(Q_ptr + QO_offsets, mask=mask_ROW[:, None], other=0.) # shape (BLOCK_SIZE_ROW_2, Dh)
     Q *= scale * rln2
-    dLdO = tl.load(dLdO_ptr + Q_offsets) # dLdO shares the same shape as Q so it can use same offsets
-    M = tl.load(M_ptr + offsets_ROW)[:, None] # shape (BLOCK_SIZE_ROW_2, 1)
+    dLdO = tl.load(dLdO_ptr + QO_offsets, mask=mask_ROW[:, None], other=0.) # shape (BLOCK_SIZE_ROW_2, Dh)
+    LSE = tl.load(LSE_ptr + offsets_ROW, mask=mask_ROW, other=0.)[:, None] # shape (BLOCK_SIZE_ROW_2, 1)
 
     # accumulate the gradients into here
-    dLdQ = tl.zeros([BLOCK_SIZE_ROW_2, D], dtype=tl.float32)
+    dLdQ = tl.zeros([BLOCK_SIZE_ROW_2, Dh], dtype=tl.float32)
 
     # compute dQ for blocks on the diagonal
     dLdQ = _attn_backward_Q(
-        dLdQ, Q, dLdO, M, 
+        dLdQ, Q, dLdO, LSE, 
         K_ptr, V_ptr, Delta_ptr, 
-        stride_N, stride_D,
-        H, N, D,
+        stride_N, stride_Dh,
+        H, N, Dh,
         BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2,
         start_ROW, start_COL, num_steps,
         scale, ln2, rln2,
@@ -621,14 +622,14 @@ def attn_backward(
     start_COL = 0 #end_COL - num_steps * BLOCK_SIZE_COL_2 # could just call it 0 lmao
     num_steps = end_COL // BLOCK_SIZE_COL_2
     dLdQ = _attn_backward_Q(
-        dLdQ, Q, dLdO, M, 
+        dLdQ, Q, dLdO, LSE, 
         K_ptr, V_ptr, Delta_ptr, 
-        stride_N, stride_D,
-        H, N, D,
+        stride_N, stride_Dh,
+        H, N, Dh,
         BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2,
         start_ROW, start_COL, num_steps,
         scale, ln2, rln2,
         MASK=False
     )
     dLdQ *= scale * rln2
-    tl.store(dLdQ_ptr + Q_offsets, dLdQ)
+    tl.store(dLdQ_ptr + QO_offsets, dLdQ, mask=mask_ROW[:, None])
