@@ -50,11 +50,9 @@ def save_heatmaps(torch_tensor: torch.Tensor, triton_tensor: torch.Tensor, test_
     abs_diff = np.abs(expected - actual)
     abs_threshold = atol
     rel_threshold = rtol * np.abs(expected)
-    combined_threshold = atol + rtol * np.abs(expected)
     
     abs_fail_mask = (abs_diff > abs_threshold).astype(np.int32)
     rel_fail_mask = (abs_diff > rel_threshold).astype(np.int32)
-    combined_fail_mask = (abs_diff > combined_threshold).astype(np.int32)
     
     def save_figure(matrix, title: str, filename: str, cmap: str = "hot"):
         plt.figure(figsize=(8, 6))
@@ -67,7 +65,7 @@ def save_heatmaps(torch_tensor: torch.Tensor, triton_tensor: torch.Tensor, test_
         plt.close()
     
     def save_all_figures(diff: np.ndarray, abs_mask: np.ndarray, rel_mask: np.ndarray, 
-                        comb_mask: np.ndarray, suffix: str, filename_suffix: str):
+                        suffix: str, filename_suffix: str):
         # Raw difference
         save_figure(diff, f"{test_name} {suffix} - raw diff ({phase})",
                    f"{test_name}_{filename_suffix}_raw_diff_{phase}.png")
@@ -77,9 +75,6 @@ def save_heatmaps(torch_tensor: torch.Tensor, triton_tensor: torch.Tensor, test_
         # Relative tolerance failures
         save_figure(rel_mask, f"{test_name} {suffix} - rel failure mask ({phase})",
                    f"{test_name}_{filename_suffix}_rel_fail_{phase}.png", cmap="Reds")
-        # Combined tolerance failures
-        save_figure(comb_mask, f"{test_name} {suffix} - combined failure mask ({phase})",
-                   f"{test_name}_{filename_suffix}_comb_fail_{phase}.png", cmap="Reds")
 
     # Handle different tensor dimensions
     if expected.ndim == 4:  # (batch_size, num_heads, seq_len, head_dim)
@@ -87,30 +82,26 @@ def save_heatmaps(torch_tensor: torch.Tensor, triton_tensor: torch.Tensor, test_
         for b in range(B):
             for h in range(H):
                 save_all_figures(
-                    abs_diff[b, h], abs_fail_mask[b, h],
-                    rel_fail_mask[b, h], combined_fail_mask[b, h],
+                    abs_diff[b, h], abs_fail_mask[b, h], rel_fail_mask[b, h],
                     f"diff: batch {b} head {h}", f"diff_b{b}_h{h}"
                 )
     elif expected.ndim == 3:  # (batch_size, seq_len, model_dim)
         B, N, D = expected.shape
         for b in range(B):
             save_all_figures(
-                abs_diff[b], abs_fail_mask[b],
-                rel_fail_mask[b], combined_fail_mask[b],
+                abs_diff[b], abs_fail_mask[b], rel_fail_mask[b], 
                 f"diff: batch {b}", f"diff_b{b}"
             )
     elif expected.ndim == 2:  # (batch_size, model_dim)
         B, D = expected.shape
         save_all_figures(
-            abs_diff, abs_fail_mask,
-            rel_fail_mask, combined_fail_mask,
+            abs_diff, abs_fail_mask, rel_fail_mask,
             "diff", "diff"
         )
     else:
         # Fallback for other shapes
         save_all_figures(
-            abs_diff, abs_fail_mask,
-            rel_fail_mask, combined_fail_mask,
+            abs_diff, abs_fail_mask, rel_fail_mask, 
             "diff", "diff"
         )
 
@@ -176,7 +167,6 @@ def test_operation(op_name: str,
     
     # Check gradients
     for i, (torch_input, triton_input) in enumerate(zip(torch_inputs, triton_inputs)):
-        print(f"Analyzing gradient for input tensor index {i} with shape {torch_input.grad.shape}...")
         try:
             torch.testing.assert_close(torch_input.grad, triton_input.grad, atol=atol, rtol=rtol)
         except AssertionError as error:
@@ -645,7 +635,7 @@ if __name__ == "__main__":
         
     ### Flash Attention
     if args.all or args.flash:
-        Dh = 128
+        Dh = 32
         def inputs_list(input_shapes):
             return [torch.randn(size=shape, dtype=torch.float32, device=device, requires_grad=True) * 0.02
                     for shape in input_shapes]
@@ -654,10 +644,18 @@ if __name__ == "__main__":
         def torch_flash(q, k, v): 
             return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, scale=math.sqrt(Dh))
         test_operation(
-            f"causal flash attention",
+            f"causal flash attention with sequence length that's a multiple of block size",
             triton_flash,
             torch_flash,
             inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
+            atol=2e-3, # there's so many operations in here that occasionally one single element surpasses 1e-3
+            rtol=1e-1 # relative tolerance can ligma
+        )
+        test_operation(
+            f"causal flash attention with sequence length that's NOT a multiple of block size",
+            triton_flash,
+            torch_flash,
+            inputs_list([(B,H,N - 3,Dh), (B,H,N - 3,Dh), (B,H,N - 3,Dh)]),
             atol=2e-3,
             rtol=1e-1
         )

@@ -269,34 +269,35 @@ def attn_fwd(
 @triton.jit
 def attn_backward_preprocess(
     O_ptr, dLdO_ptr, Delta_ptr,
-    N, D: tl.constexpr,
+    stride_O_B, stride_O_H, stride_O_N, stride_O_Dh,
+    stride_dLdO_B, stride_dLdO_H, stride_dLdO_N, stride_dLdO_Dh,
+    stride_Delta_B, stride_Delta_H, stride_Delta_N,
+    N, Dh: tl.constexpr,
     PRE_BLOCK_SIZE_ROW: tl.constexpr,
 ):
     """the job of this kernel is to pre-compute Delta since Delta is used by both of the following two kernels"""
-    index_batch_head = tl.program_id(1) # B * H number of pids
+    index_BH = tl.program_id(1) # B * H number of pids
     row = tl.program_id(0) # N / BLOCK_SIZE_ROW number of pids
 
     row_offsets = row * PRE_BLOCK_SIZE_ROW + tl.arange(0, PRE_BLOCK_SIZE_ROW)
-    col_offsets = tl.arange(0, D)
-
+    col_offsets = tl.arange(0, Dh)
     mask = row_offsets < N
 
     # Load PRE_BLOCK_SIZE_ROW rows of O
-    O_ptr += index_batch_head * D * N # moves O_ptr to the correct batch & head for this pid.
-        # D * N is equal to stride_H. we can use it instead of .stride() assuming we know dLdO is contiguous
-    O_offsets = row_offsets[:, None] * D + col_offsets[None, :]
-    O_block = tl.load(O_ptr + O_offsets, mask = mask[:, None], other=0.) # shape (PRE_BLOCK_SIZE_ROW, D)
+    O_ptr += index_BH * stride_O_H # moves O_ptr to the correct batch & head for this pid.
+    O_offsets = row_offsets[:, None] * stride_O_N + col_offsets[None, :] * stride_O_Dh
+    O = tl.load(O_ptr + O_offsets, mask = mask[:, None], other=0.) # shape (PRE_BLOCK_SIZE_ROW, D)
 
     # Load PRE_BLOCK_SIZE_ROW rows of dLdO
-    dLdO_ptr += index_batch_head * D * N
-    dLdO_offsets = row_offsets[:, None] * D + col_offsets[None, :]
-    dLdO_block = tl.load(dLdO_ptr + dLdO_offsets, mask = mask[:, None], other=0.) # shape (PRE_BLOCK_SIZE_ROW, D) 
+    dLdO_ptr += index_BH * stride_dLdO_H
+    dLdO_offsets = row_offsets[:, None] * stride_dLdO_N + col_offsets[None, :] * stride_dLdO_Dh
+    dLdO = tl.load(dLdO_ptr + dLdO_offsets, mask = mask[:, None], other=0.) # shape (PRE_BLOCK_SIZE_ROW, D) 
 
-    # Delta is the dot product of O and dLdO along D, giving us a single scalar Delta_i per token in N
+    # Delta is the dot product of O and dLdO along Dh, giving us a single scalar Delta_i per token in N
     # it will be useful in later parts of the backward pass
-    Delta_block = tl.sum(dLdO_block * O_block, axis=1) # shape (PRE_BLOCK_SIZE_ROW)
-    Delta_ptr += index_batch_head * N
-    tl.store(Delta_ptr + row_offsets, Delta_block, mask = mask)
+    Delta = tl.sum(dLdO * O, axis=1) # shape (PRE_BLOCK_SIZE_ROW)
+    Delta_ptr += index_BH * stride_Delta_H
+    tl.store(Delta_ptr + row_offsets, Delta, mask = mask)
 
 
 @triton.jit

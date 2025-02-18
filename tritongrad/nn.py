@@ -245,8 +245,8 @@ class FlashAttention(Module):
         scale: float = None,
     ):
         assert Q.shape == K.shape == V.shape
-        assert Q.shape[-1] in (128, 256), \
-            f'flash attention only supports head dimension of 128 or 256 but got {q.shape[-1]}'
+        assert Q.shape[-1] in (32, 64, 128, 256), \
+            f'flash attention only supports head dimension of 32, 64, 128 or 256 but got {q.shape[-1]}'
             # the kernel actually isn't this limited but too much larger and it would break
         B, H, N, D = Q.shape
 
@@ -287,15 +287,18 @@ class FlashAttention(Module):
             Delta = torch.empty_like(LSE)
 
             # the ordering of your grid matters because it determines which programs end up sharing the same SRAM
-            pre_grid = lambda meta: (N // meta["PRE_BLOCK_SIZE_ROW"], B * H)
+            pre_grid = lambda meta: (triton.cdiv(N, meta["PRE_BLOCK_SIZE_ROW"]), B * H)
                 # in this case, we want the parallelizations along the N dimension to be near each other so they can
                 #  share data, while parallelization across batches & heads don't necessitate any sharing
             flash_attention.attn_backward_preprocess[pre_grid](
                 out.data, out.grad, Delta,
+                out.data.stride(0), out.data.stride(1), out.data.stride(2), out.data.stride(3),
+                out.grad.stride(0), out.grad.stride(1), out.grad.stride(2), out.grad.stride(3),
+                Delta.stride(0), Delta.stride(1), Delta.stride(2),
                 N, D,
             )
 
-            grid = lambda meta: (N // meta["BLOCK_SIZE_MACRO"], B * H) 
+            grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE_MACRO"]), B * H) 
             flash_attention.attn_backward[grid](
                 Q.data, K.data, V.data,
                 out.grad, Q.grad, K.grad, V.grad,
