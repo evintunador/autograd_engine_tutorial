@@ -269,7 +269,8 @@ class FlashAttention(Module):
             B, H, N, D,
         )
 
-        # TODO rename M to LSE for clarity
+        # we're reusing the tensor originally meant to store max values now for storing logsumexp
+        LSE = M
 
         # wrap output in a triton tensor to add it to our graph
         out = TritonTensor(
@@ -300,7 +301,7 @@ class FlashAttention(Module):
             flash_attention.attn_backward[grid](
                 Q.data, K.data, V.data,
                 out.grad, Q.grad, K.grad, V.grad,
-                M, Delta,
+                LSE, Delta,
                 scale,
                 Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
                 H, N, D,

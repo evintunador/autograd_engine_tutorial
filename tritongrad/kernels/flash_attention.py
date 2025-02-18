@@ -39,23 +39,24 @@ def _attn_fwd_inner(
 
     K_T_offsets += lo * stride_K_N
     V_offsets += lo * stride_V_N
+    offsets_KV_N += lo
 
-    # loop over blocks along the sequence length dimension of k & v and update accumulator while doing so
+    # loop over blocks along the N dimension of K & V and update the O accumulator while doing so
     for start_KV in range(lo, hi, BLOCK_SIZE_KV):
         # Just let the compiler know that start_KV is a multiple of BLOCK_SIZE_KV, so the compiler can do optimizations
         start_KV = tl.multiple_of(start_KV, BLOCK_SIZE_KV)
             # when in doubt, use tl.multiple_of() for any dynamic variable (as opposed to static variables)
 
-        # compute (Q @ K^T) / sqrt{D}
-        N_mask_K_T = K_T_offsets < N
-        K_T = tl.load(K_ptr + K_T_offsets, mask=N_mask_K_T, other=0.) # shape (Dh, BLOCK_SIZE_KV)
+        # compute (Q @ K^T) / sqrt{Dh}
+        N_mask_KV = offsets_KV_N < N
+        K_T = tl.load(K_ptr + K_T_offsets, mask=N_mask_KV[None, :], other=0.) # shape (Dh, BLOCK_SIZE_KV)
             # sequence mask sets non-existent tokens in the block past N to zero vector
         S = tl.dot(Q, K_T) * softmax_scale # shape (BLOCK_SIZE_QO, BLOCK_SIZE_KV)
             # the masked tokens create columns & rows of zeros hugging the bottom and right edges of S
 
         if DIAGONAL: # if we're currently on a block containing the diagonal
             # the causal mask is True on the lower-triangular including the diagonal
-            causal_mask = offsets_QO_N[:, None] >= (start_KV + offsets_KV_N[None, :])
+            causal_mask = offsets_QO_N[:, None] >= (offsets_KV_N[None, :])
             # causal mask addition sets upper-triangular values (excluding diagonal) to -inf
             S += tl.where(causal_mask, 0, -1.0e6) # shape (BLOCK_SIZE_QO, BLOCK_SIZE_KV)
         # notice that the masked out tokens previously hugging the right edge of S have all been replaced with -inf
@@ -87,8 +88,7 @@ def _attn_fwd_inner(
             # for each of the masked non-existent tokens they approach N for their entry L_i
 
         # This computes O = P @ V + O * alpha
-        N_mask_V = V_offsets < N
-        V = tl.load(V_ptr + V_offsets, mask=N_mask_V, other=0.) # shape (BLOCK_SIZE_KV, Dh)
+        V = tl.load(V_ptr + V_offsets, mask=N_mask_KV[:, None], other=0.) # shape (BLOCK_SIZE_KV, Dh)
         O = O * alpha[:, None] # adjusts previous values based on potential new max
         # accumulated P and V block dot product into O
         O = tl.dot(P, V, acc=O) # shape (BLOCK_SIZE_QO, Dh)
@@ -104,6 +104,7 @@ def _attn_fwd_inner(
         # iterate pointers
         K_T_offsets += BLOCK_SIZE_KV * stride_K_N
         V_offsets += BLOCK_SIZE_KV * stride_V_N
+        offsets_KV_N += BLOCK_SIZE_KV
 
     return O, L, M # we save these three specifically for use later in the backward pass
 
@@ -150,13 +151,12 @@ def attn_fwd(
     
     # as opposed to regular assert, static_assert occurs at compile-time
     tl.static_assert(BLOCK_SIZE_KV <= Dh)
-        # D is usually relatively small (128 or 256) so it wouldn't make sense to parallelize within it
+        # Dh is usually relatively small (128 or 256) so it wouldn't make sense to parallelize within it
 
     # This indicates which block in the sequence length to process
     block_index_QO = tl.program_id(0)
     # This indicates which head and batch to process. Each program is associated with a single head of a single batch
     index_BH = tl.program_id(1)
-    #print_if(f'index_batch_head = {index_batch_head} | block_index_q = {block_index_q}', '')
     # This indicates which batch this program is associated with (each batch has H heads)
     index_B = index_BH // H
     # This indicates the position of the head in the batch
@@ -171,7 +171,7 @@ def attn_fwd(
     # Offsets for N are split by pids but for Dh we keep the whole thing in SRAM.
     offsets_QO_N = block_index_QO * BLOCK_SIZE_QO + tl.arange(0, BLOCK_SIZE_QO) # shape (BLOCK_SIZE_QO)
     offsets_KV_N = tl.arange(0, BLOCK_SIZE_KV)
-    offsets_Dh = tl.arange(0, Dh) # shape (Dh)
+    offsets_Dh = tl.arange(0, Dh)
     
     # create offsets specific to each tensor
     Q_offsets = (offsets_QO_N[:, None] * stride_Q_N + offsets_Dh[None, :] * stride_Q_Dh)
@@ -445,11 +445,11 @@ def _attn_backward_Q(
     [
         triton.Config({"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
                         num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE_MICRO in [16, 32, 64]
-        for BLOCK_SIZE_MACRO in [32, 64, 128]
+        for BLOCK_SIZE_MICRO in [16, 32]
+        for BLOCK_SIZE_MACRO in [32, 64]
         for num_stages in [1, 3, 5]
         for num_warps in [2, 4, 8]
-        if BLOCK_SIZE_MACRO > BLOCK_SIZE_MICRO
+        if BLOCK_SIZE_MACRO > BLOCK_SIZE_MICRO # could do >= but i wanna get mileage out of the loop code we wrote
     ],
     key=["N", "D"], # auto-tune will re-run every time either of these values changes in a new input
 )
