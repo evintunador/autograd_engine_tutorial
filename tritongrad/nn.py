@@ -252,12 +252,12 @@ class FlashAttention(Module):
 
         # pre-allocate output tensor
         O = torch.empty_like(Q.data) # output tensor will be pre head concatenation and mixing
-        # and pre-allocate logsumexp
+        # and pre-allocate the tensor where we hold maximums, which will later be repurposed as the logsumexp
         M = torch.empty((B, H, N), device=Q.device, dtype=torch.float32)
         
         grid = lambda args: (
-            triton.cdiv(N, args["BLOCK_SIZE_Q"]), # primary parallelizatoin is across sequence length
-            B * H, # parallelize across the dimensions that don't matter
+            triton.cdiv(N, args["BLOCK_SIZE_QO"]), # primary parallelizatoin is across sequence length
+            B * H, # further parallelize across the dimensions that don't matter
         )
         flash_attention.attn_fwd[grid](
             Q.data, K.data, V.data, M, O,
@@ -268,6 +268,8 @@ class FlashAttention(Module):
             O.stride(0), O.stride(1), O.stride(2), O.stride(3),
             B, H, N, D,
         )
+
+        # TODO rename M to LSE for clarity
 
         # wrap output in a triton tensor to add it to our graph
         out = TritonTensor(
