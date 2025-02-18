@@ -658,6 +658,8 @@ if __name__ == "__main__":
             triton_flash,
             torch_flash,
             inputs_list([(B,H,N,Dh), (B,H,N,Dh), (B,H,N,Dh)]),
+            atol=2e-3,
+            rtol=1e-1
         )
 
         

@@ -294,8 +294,7 @@ class FlashAttention(Module):
                 N, D,
             )
 
-            BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO = 16, 32 # TODO make these autotuned
-            grid = (N // BLOCK_SIZE_MACRO, B * H) # TODO make this robust to sequence lengths that are not a multiple of BLOCK_SIZE_COL_1
+            grid = lambda meta: (N // meta["BLOCK_SIZE_MACRO"], B * H) 
             flash_attention.attn_backward[grid](
                 Q.data, K.data, V.data,
                 out.grad, Q.grad, K.grad, V.grad,
@@ -303,7 +302,6 @@ class FlashAttention(Module):
                 scale,
                 Q.data.stride(0), Q.data.stride(1), Q.data.stride(2), Q.data.stride(3), # all tensors should share same stride
                 H, N, D,
-                BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO, 
             )
         out._backward = _backward
 
