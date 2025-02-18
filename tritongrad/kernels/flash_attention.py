@@ -585,13 +585,13 @@ def attn_backward(
     V_block = tl.load(V_ptr + KV_offsets) # shape (BLOCK_SIZE_COL_1, D)
 
     # we'll accumulate the gradients into these
-    dLdK_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
-    dLdV_block = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
+    dLdK = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
+    dLdV = tl.zeros([BLOCK_SIZE_COL_1, D], dtype=tl.float32)
 
     # compute dLdK and dLdV portions along the blocked diagonal
     dLdK, dLdV = _attn_backward_KV(
         K_block, V_block, 
-        dLdK_block, dLdV_block,
+        dLdK, dLdV,
         Q_ptr, dLdO_ptr,
         M_ptr, Delta_ptr,
         stride_N, stride_D,
@@ -613,7 +613,7 @@ def attn_backward(
     # compute dLdK and dLdV for non-masked blocks
     dLdK, dLdV = _attn_backward_KV(
         K_block, V_block, 
-        dLdK_block, dLdV_block,
+        dLdK, dLdV,
         Q_ptr, dLdO_ptr,
         M_ptr, Delta_ptr,
         stride_N, stride_D,
