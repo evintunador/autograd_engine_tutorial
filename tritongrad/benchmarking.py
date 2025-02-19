@@ -923,7 +923,7 @@ def generate_flashattention_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['N'],
-                    x_vals=[512 * i for i in range(1, 8, 1)],
+                    x_vals=[512 * i for i in range(1, 17, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'triton'],
                     line_names=['PyTorch', 'Triton'],
@@ -957,15 +957,12 @@ def benchmark_flashattention(N, provider, op, mode, device=DEVICE):
         dO = torch.randn_like(O)
         fn = lambda: O.backward(dO, retain_graph=True)
     
-    # TODO these calcs are incorrect, just naively copied from matmul
-    # for flash attention we'll measure TFLOPs instead of GB/s since flops are the limiting factor
     ms = triton.testing.do_bench(fn)
-    perf = (2 if mode == "fwd" else 4) * B * H * N * Dh * 1e-12 / (ms * 1e-3)
-    # 2 or 4 = number of operations per entry (mul and add for fwd & another set for two gradients during bwd)
-    # B * H * N * Dh = number of elements
-    # 1e-12 converts flops to Teraflops
-    # ms * 1e-3 converts milliseconds to seconds
-    return perf / (ms * 1e-3)
+    flops_per_matmul = 2.0 * B * H * N * N * Dh
+    total_flops = 2 * flops_per_matmul * 0.5 # 0.5 for causal
+    if mode == "bwd":
+        total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
+    return total_flops * 1e-12 / (ms * 1e-3)
 
 
 if __name__ == "__main__":

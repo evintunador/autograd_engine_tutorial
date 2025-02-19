@@ -115,12 +115,14 @@ def _attn_fwd_inner(
             {"BLOCK_SIZE_QO": BLOCK_SIZE_QO, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
             num_stages=num_stages, num_warps=num_warps,
         )
-        for BLOCK_SIZE_QO in [32]
-        for BLOCK_SIZE_KV in [32]
-        for num_stages in ([1, 3, 5])
-        for num_warps in [2, 4, 8]
+        for BLOCK_SIZE_QO in [16, 32, 64, 128]
+        for BLOCK_SIZE_KV in [16, 32, 64, 128]
+        for num_stages in [1, 3, 5, 7]
+        for num_warps in [2, 4, 8, 16]
+        if BLOCK_SIZE_QO == BLOCK_SIZE_KV # TODO they should only be one hyperparameter then
     ],
     key=["N", "D"], # auto-tune will re-run every time either of these values changes in a new input
+    # TODO is there a way to make it only change when N surpasses a new multiple of BLOCK_SIZE?
 )
 @triton.jit
 def attn_fwd(
@@ -452,13 +454,14 @@ def _attn_backward_Q(
     [
         triton.Config({"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
                         num_stages=num_stages, num_warps=num_warps,)
-        for BLOCK_SIZE_MICRO in [16, 32]
-        for BLOCK_SIZE_MACRO in [32, 64]
-        for num_stages in [1, 3, 5]
-        for num_warps in [2, 4, 8]
+        for BLOCK_SIZE_MICRO in [16, 32, 64]
+        for BLOCK_SIZE_MACRO in [32, 64, 128]
+        for num_stages in [1, 3, 5, 7]
+        for num_warps in [2, 4, 8, 16]
         if BLOCK_SIZE_MACRO > BLOCK_SIZE_MICRO # could do >= but i wanna get mileage out of the loop code we wrote
     ],
     key=["N", "D"], # auto-tune will re-run every time either of these values changes in a new input
+    # TODO is there a way to make it only change when N surpasses a new multiple of BLOCK_SIZE?
 )
 @triton.jit
 def attn_backward(
