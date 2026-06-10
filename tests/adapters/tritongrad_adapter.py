@@ -23,7 +23,7 @@ class TritongradAdapter(AdapterABC):
     # kernels/vectorwise.py and kernels/elementwise.py). Reductions are last-dim
     # only, which the registry already uses.
     OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu", "neg",
-           "softmax", "sum_lastdim", "mean", "var", "std"}
+           "softmax", "sum_lastdim", "mean", "var", "std", "max_lastdim", "min_lastdim"}
     MODULES = {"linear", "embedding", "layernorm", "attention"}
     # matmul/linear gradient accumulation and the many-op attention kernel are
     # sensitive at fp32, exactly as documented in tritongrad/testing.py.
@@ -114,6 +114,10 @@ class TritongradAdapter(AdapterABC):
             out = a.var()
         elif op_name == "std":
             out = a.std()
+        elif op_name == "max_lastdim":
+            out = a.max()
+        elif op_name == "min_lastdim":
+            out = a.min()
         else:
             raise KeyError(op_name)
         return GraphHandle(out, inputs)

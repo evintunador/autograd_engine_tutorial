@@ -105,6 +105,24 @@ def reduction_op_backward(
         dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
     if op == "mean":
         dLdx += tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N)) / row_len
+    if op == "max":
+        # the gradient of a max flows only to the element that WAS the max; every other
+        # element contributed nothing. we recompute the row max and route dLdOut there.
+        # masked-out columns load -1e9 so they can never be selected as the max.
+        x = tl.load(x_ptr + x_offsets, mask=x_mask, other=-1e9)
+        extreme = tl.max(x, axis=1)                                  # (BLOCK_SIZE_M,)
+        is_extreme = (x == extreme[:, None]) & x_mask                # only real, maximal entries
+        dLdOut_b = tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        dLdx += tl.where(is_extreme, dLdOut_b, 0.0)
+        # NOTE: on exact ties this routes the gradient to every tied element (like
+        # torch.amax) rather than just the first (like torch.max(dim).values). For the
+        # suite's continuous random inputs ties are measure-zero so the two agree.
+    if op == "min":
+        x = tl.load(x_ptr + x_offsets, mask=x_mask, other=1e9)
+        extreme = tl.min(x, axis=1)                                  # (BLOCK_SIZE_M,)
+        is_extreme = (x == extreme[:, None]) & x_mask
+        dLdOut_b = tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        dLdx += tl.where(is_extreme, dLdOut_b, 0.0)
     if op == "var":
         # Out = Var(x) = sum((x - mean(x)) ** 2) / (n-1) 
         # Breaking down into nested functions:
