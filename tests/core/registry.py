@@ -48,6 +48,7 @@ OP_REGISTRY = [
     OpSpec("exp", lambda g: [_std(g, S)], torch.exp),
     OpSpec("log", lambda g: [_pos(g, S)], torch.log),
     OpSpec("relu", lambda g: [_std(g, S)], torch.relu),
+    OpSpec("neg", lambda g: [_std(g, S)], lambda x: -x),
     OpSpec("softmax", lambda g: [_std(g, S)], lambda x: torch.softmax(x, dim=-1)),
     OpSpec("sum_lastdim", lambda g: [_std(g, S)], lambda x: x.sum(dim=-1)),
     OpSpec("mean", lambda g: [_std(g, S)], lambda x: x.mean(dim=-1)),

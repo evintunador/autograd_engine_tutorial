@@ -223,8 +223,14 @@ def layernorm_backward(
     c2 = tl.sum(dLdxhat, axis=1) / D # shape (BLOCK_SIZE_ROW)
     dLdx = (dLdxhat - (xhat * c1[:, None] + c2[:, None])) * rstd # shape (BLOCK_SIZE_ROW, BLOCK_SIZE_COLS)
 
-    # assuming x offsets & mask will work for dLdx
-    tl.store(dLdx_ptr + x_offsets, dLdx, mask = x_mask)
+    # assuming x offsets & mask will work for dLdx.
+    # accumulate (load + add + store) rather than overwrite so that an input feeding
+    # both a LayerNorm and a residual add (i.e. every transformer block: x = x + f(norm(x)))
+    # sums the two gradient paths instead of the norm clobbering the residual's. Each pid
+    # owns distinct rows, so there's no intra-launch race; cross-launch accumulation is
+    # safe because backward passes run sequentially in reverse-topological order.
+    dLdx_prev = tl.load(dLdx_ptr + x_offsets, mask = x_mask, other=0.)
+    tl.store(dLdx_ptr + x_offsets, dLdx_prev + dLdx, mask = x_mask)
 
     # accumulate partial sums for dLdw and dLdb
     dLdw_portion = tl.sum(dLdy * xhat, axis=0) # shape (BLOCK_SIZE_COLS)
