@@ -8,10 +8,12 @@ from tests.adapters.torch_ref import TorchAdapter
 from tests.adapters.micrograd_adapter import MicrogradAdapter
 from tests.adapters.minigrad_adapter import MinigradAdapter
 from tests.adapters.tritongrad_adapter import TritongradAdapter
+from tests.adapters.cudagrad_adapter import CudagradAdapter
 
 ADAPTERS = [
     TorchAdapter,
     MicrogradAdapter,
     MinigradAdapter,
     TritongradAdapter,
+    CudagradAdapter,
 ]
