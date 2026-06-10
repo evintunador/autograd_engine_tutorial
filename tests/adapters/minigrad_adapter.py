@@ -28,8 +28,9 @@ def _seeded_backward(out, grad_output):
 
 class MinigradAdapter(AdapterABC):
     name = "minigrad"
-    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu",
-           "softmax", "sum_lastdim", "mean", "var", "std"}
+    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu", "neg",
+           "softmax", "sum_lastdim", "mean", "var", "std",
+           "max_lastdim", "min_lastdim"}
     MODULES = {"linear", "embedding", "layernorm", "attention"}
     # the many-op attention path (matmul -> mask -> softmax -> matmul) accumulates
     # fp32 error, so match the registry's looser attention tolerance.
@@ -74,6 +75,8 @@ class MinigradAdapter(AdapterABC):
             out = a.log()
         elif op_name == "relu":
             out = a.relu()
+        elif op_name == "neg":
+            out = -a
         elif op_name == "softmax":
             out = a.softmax(dim=-1)
         elif op_name == "sum_lastdim":
@@ -84,6 +87,10 @@ class MinigradAdapter(AdapterABC):
             out = a.var(dim=-1)
         elif op_name == "std":
             out = a.sd(dim=-1)
+        elif op_name == "max_lastdim":
+            out = a.max(dim=-1)[0]  # (values, indices) -> values
+        elif op_name == "min_lastdim":
+            out = a.min(dim=-1)[0]
         else:
             raise KeyError(op_name)
         return GraphHandle(out, inputs)
