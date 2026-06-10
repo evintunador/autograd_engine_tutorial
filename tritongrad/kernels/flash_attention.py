@@ -315,10 +315,10 @@ def _attn_backward_KV(
     scale, ln2: tl.constexpr, rln2: tl.constexpr,
     MASK: tl.constexpr
 ):
-    """
+    r"""
     this kernel will be looking at a specific chunk of K & V , where we call
     the sequence length of K & V the columns of our NxN attention matrix,
-    and iterating through rows of Q's sequence length to calculate that 
+    and iterating through rows of Q's sequence length to calculate that
     chunk of dLdK and dLdV
                     N of K & V
                |    |   |   |   |
