@@ -30,6 +30,26 @@ class Module: # just to make our syntax the same as pytorch's
                 out += child.parameters()
         return out if out else None
 
+def scaled_dot_product_attention(q, k, v, scale, mask=None):
+    '''
+    The core of self-attention, factored out so it can be unit-tested against
+    torch.nn.functional.scaled_dot_product_attention.
+
+    inputs:
+      q, k, v - Tensors of shape (..., s, hd) (the leading dims are batch/heads)
+      scale   - scalar applied to the attention logits
+      mask    - optional boolean array of shape (s, s); True positions are blocked
+                (filled with -inf) before the softmax (e.g. a causal mask)
+
+    output:
+      Tensor of shape (..., s, hd)
+    '''
+    logits = (q @ k.transpose()) * scale            # (..., s, hd) @ (..., hd, s) -> (..., s, s)
+    if mask is not None:
+        logits = logits.masked_fill(mask, float('-inf'))
+    scores = logits.softmax()                       # softmax over the last (keys) dim
+    return scores @ v                               # (..., s, s) @ (..., s, hd) -> (..., s, hd)
+
 class Linear(Module):
     def __init__(self, in_dim: int, out_dim: int, bias = True):
         super().__init__()
@@ -98,9 +118,11 @@ class LayerNorm(Module):
         self.dim = dim
         self.eps = 1e-5
 
-        if elementwise_affine: 
-            # TODO: should this be np.ones???
-            self.affine = Parameter(np.random.normal(scale=0.02, size=dim).astype(np.float32))
+        if elementwise_affine:
+            # standard LayerNorm init: unit gain, zero shift (matches torch). The
+            # test suite weight-syncs from torch so init is invisible there, but
+            # training should start as the identity transform, not from noise.
+            self.affine = Parameter(np.ones(dim).astype(np.float32))
             self.bias = Parameter(np.zeros(dim).astype(np.float32))
 
     def __call__(self, x):
@@ -127,34 +149,37 @@ class CrossEntropyLoss(Module):
         self.vocab_len = vocab_len
         self.pad_token = pad_token
 
-    def __call__(self, probabilities: Tensor, targets: np.ndarray) -> Tensor:
+    def __call__(self, logits: Tensor, targets: np.ndarray) -> Tensor:
         '''
-        inputs: 
-          probabilities - Tensor of shape (batch_size, seq_len, vocab_len) 
-                          representing predicted probabilities. Each slice along last dimension
-                          must sum to 1 (i.e., a proper probability distribution).
+        inputs:
+          logits        - Tensor of shape (batch_size, seq_len, vocab_len) of raw,
+                          un-normalized scores. Log-softmax is applied internally,
+                          so the model itself outputs logits (and inference can
+                          softmax them directly).
           targets       - np.ndarray of shape (batch_size, seq_len) of integer token indices
 
-        output: 
+        output:
           Scalar Tensor representing average cross-entropy loss across the whole batch/sequence.
           If pad_token is set, those positions are ignored in the average.
         '''
-        B, L, V = probabilities.shape
+        B, L, V = logits.shape
         # Basic shape checks
         assert (B, L) == targets.shape, \
-            f"Shape mismatch: probabilities {probabilities.shape} vs targets {targets.shape}"
-        
+            f"Shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+
+        # turn logits into log-probabilities (numerically-stable softmax, then log)
+        log_probs = logits.softmax(dim=-1).log()        # (B, L, V)
+
         # Flatten predictions and targets so we can index easily
-        probabilities_2d = probabilities.reshape((B*L, V))  # (B, L, V) -> (B*L, V)
+        log_probs_2d = log_probs.reshape((B*L, V))      # (B, L, V) -> (B*L, V)
         targets_flat = targets.ravel()                  # (B, L) -> (B*L)
-        
-        # Gather probabilities of the correct classes
-        picked_probs = probabilities_2d[range(probabilities_2d.shape[0]), targets_flat] # (B*L, V) -> (B*L)
-        log_picked = picked_probs.log()
-        
+
+        # Gather the log-probability of the correct class at each position
+        log_picked = log_probs_2d[range(log_probs_2d.shape[0]), targets_flat] # (B*L, V) -> (B*L)
+
         # If we have a pad token, ignore those positions
         if self.pad_token is not None:
-            pad_mask = (targets_flat == self.pad_token).astype(np.float32) # (B*L)
+            pad_mask = (targets_flat == self.pad_token) # (B*L,) bool
             log_picked = log_picked.masked_fill(pad_mask, 0.)
 
         return - log_picked.mean() # (B*L) -> (1)
@@ -228,7 +253,7 @@ if __name__ == "__main__":
     targets_pad[:,-1] = 0
     
     celoss = CrossEntropyLoss(vocab_size)
-    loss = celoss(probs, targets)
+    loss = celoss(logits, targets)  # CrossEntropyLoss applies log-softmax internally
     print("Basic loss (no padding):", loss.data)
     loss.backward()
     print(logits)
@@ -237,7 +262,7 @@ if __name__ == "__main__":
     # Test case 2: With pad token
     pad_token = 0
     celoss_pad = CrossEntropyLoss(vocab_size, pad_token=pad_token)
-    loss_pad = celoss_pad(probs, targets_pad)
+    loss_pad = celoss_pad(logits, targets_pad)
     print("Loss with padding:", loss_pad.data)
     loss_pad.backward()
     print(logits)

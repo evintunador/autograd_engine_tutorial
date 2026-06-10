@@ -30,7 +30,10 @@ class MinigradAdapter(AdapterABC):
     name = "minigrad"
     OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu",
            "softmax", "sum_lastdim", "mean", "var", "std"}
-    MODULES = {"linear", "embedding", "layernorm"}
+    MODULES = {"linear", "embedding", "layernorm", "attention"}
+    # the many-op attention path (matmul -> mask -> softmax -> matmul) accumulates
+    # fp32 error, so match the registry's looser attention tolerance.
+    tol_overrides = {"attention": {"atol": 2e-3, "rtol": 1e-1}}
 
     @classmethod
     def available(cls):
@@ -139,6 +142,24 @@ class MinigradAdapter(AdapterABC):
                 param_grads={"weight": np.asarray(a_param.grad),
                              "bias": np.asarray(b_param.grad)},
                 input_grads={0: np.asarray(x.grad)},
+            )
+
+        if spec.name == "attention":
+            # registry hands us pre-split q/k/v of shape (B, H, N, D); compare the
+            # factored scaled_dot_product_attention helper against torch's causal SDPA
+            q = Tensor(input_arrays[0].astype(np.float32), requires_grad=True)
+            k = Tensor(input_arrays[1].astype(np.float32), requires_grad=True)
+            v = Tensor(input_arrays[2].astype(np.float32), requires_grad=True)
+            N = spec.config["N"]
+            causal = np.triu(np.ones((N, N)), k=1).astype(bool)
+            out = nn.scaled_dot_product_attention(q, k, v, spec.config["scale"], causal)
+            _seeded_backward(out, grad_output)
+            return ModuleResult(
+                out=np.asarray(out.data),
+                param_grads={},
+                input_grads={0: np.asarray(q.grad),
+                             1: np.asarray(k.grad),
+                             2: np.asarray(v.grad)},
             )
 
         raise NotImplementedError(spec.name)

@@ -217,9 +217,14 @@ class Tensor:
                      self.requires_grad, (self,))
         def _backward():
             if self.requires_grad:
-                # when keepdim=False the reduced axis was dropped, so re-insert it
-                # before broadcasting the upstream gradient back to the input shape
-                g = out.grad if keepdim else np.expand_dims(out.grad, axis=dim)
+                # reshape the upstream grad to the input shape with the reduced axis
+                # kept as size 1, then broadcast it back. Using reshape (rather than
+                # expand_dims) is robust to the reduction collapsing to a scalar:
+                # a full reduction yields a numpy scalar that __init__ wraps to
+                # shape (1,), which expand_dims would over-expand.
+                keep_shape = list(self.shape)
+                keep_shape[dim] = 1
+                g = np.reshape(out.grad, keep_shape)
                 self.grad += np.broadcast_to(g, self.shape)
         out._backward = _backward
         return out
@@ -407,13 +412,19 @@ class Tensor:
         out._backward = _backward
         return out
         
-    def masked_fill(self, mask: np.ndarray, fill_value: float) -> 'Tensor':
-        out = Tensor(np.where(mask, fill_value, self.data),
+    def masked_fill(self, mask: Union[np.ndarray, 'Tensor'], fill_value: float) -> 'Tensor':
+        # accept either a raw numpy bool array or a Tensor wrapping one
+        mask_arr = mask.data if isinstance(mask, Tensor) else np.asarray(mask)
+        out = Tensor(np.where(mask_arr, fill_value, self.data),
                     requires_grad=self.requires_grad,
                     _children=(self,))
         def _backward():
             if self.requires_grad:
-                self.grad += out.grad * (mask.data == False)
+                # gradient only flows through the UN-masked (kept) positions.
+                # NB: `mask_arr == False` is elementwise here (a numpy array);
+                # `mask.data == False` would compare a memoryview and collapse to
+                # a single False, silently zeroing every gradient.
+                self.grad += out.grad * (mask_arr == False)
         out._backward = _backward
         return out
 
