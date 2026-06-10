@@ -22,6 +22,9 @@ the plan for this repo is to create tutorials on autograd engines for three leve
 |                   | OpenAI's [Triton](https://triton-lang.org/main/index.html)                                                                                                         | ❌                    | ❌                    | ✅                 | ❌                      |
 |                   | Nvidia's [CUDA](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=24.04&target_type=deb_local)     | ❌                    | ❌                    | ❌                 | ✅                      |
 
+## testing
+all three implementations are checked against [PyTorch](https://pytorch.org) (forward & backward, ops & nn modules) by a single unified suite in [`tests/`](tests/). run `pytest tests/` from the repo root; backends needing hardware you don't have (e.g. `tritongrad` wants a CUDA GPU) are skipped rather than failed. adding a new implementation (`cutilegrad`, `cudagrad`, …) just means writing one adapter file — see [`tests/README.md`](tests/README.md).
+
 ## micrograd
 the purpose of this lesson is for absolute beginners with a programming (as opposed to math) background to learn about the math and implementation of GPTs all the way from the barebones autograd engine and up to the GPT operations itself. the basic building block of micrograd is the `Value` object, each of which is just a single floating point number for the data and another single floating point number to keep track of the data's gradient. the first half or so of this lesson is roughly equivalent to [karpathy's `micrograd`](https://youtu.be/VMj-3S1tku0?si=FM0qtfV-cvXr2kDJ) while the second half is an extension to implement a full GPT
 ##### TODO:

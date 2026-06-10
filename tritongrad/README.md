@@ -3,6 +3,8 @@ the purpose of this lesson is for people already confident in the math behind au
 
 Unfortunately unlike micrograd and minigrad, we will not actually be starting from scratch here. Triton is built to work with only Pytorch tensors, so we'll have to use them as the building block of our framework. However, we will still be implementing the forward and backward passes entirely in Triton, so imma still count it
 
+> **Testing:** correctness checks now live in the repo-wide [`../tests/`](../tests/) suite (run `pytest tests/ -k tritongrad` on a CUDA host). The original `testing.py` harness here still works but is superseded by it; its heatmap visualization was ported into `tests/core/heatmaps.py`.
+
 ## why triton?
 You might be asking: why are we using Triton instead of CUDA? I'm open to the idea of learning and then doing a lesson on CUDA (and MPS for that matter) in the future, but for now here are the pros and cons that it came down to:
 
