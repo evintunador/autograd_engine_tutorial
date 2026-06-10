@@ -55,11 +55,11 @@ def reduction_op_forward(
     if op == "min":
         y = tl.min(x, axis=1)
     if op == "var":
-        err = x - tl.sum(x, axis=1, keep_dims=True)
-        y = tl.sum(err * err, axis=1) / (row_len - 1)
+        err = x - tl.sum(x, axis=1, keep_dims=True) / row_len  # subtract the mean, not the sum
+        y = tl.sum(err * err, axis=1) / row_len                # population variance
     if op == "std":
-        err = x - tl.sum(x, axis=1, keep_dims=True)
-        y = tl.sum(err * err, axis=1) / (row_len - 1)
+        err = x - tl.sum(x, axis=1, keep_dims=True) / row_len  # subtract the mean, not the sum
+        y = tl.sum(err * err, axis=1) / row_len                # population variance
         y = tl.sqrt(y)
 
     # Store result
@@ -150,7 +150,7 @@ def reduction_op_backward(
         dzdy = 2.0 * y
         dwdz = 1.0 / (row_len - 1)
         # Calculate variance (w) for dOutdw
-        w = tl.sum(y * y, axis=1, keep_dims=True) / (row_len - 1)
+        w = tl.sum(y * y, axis=1, keep_dims=True) / row_len  # population variance
         dOutdw = 0.5 * tl.rsqrt(w)
         dLdOut = tl.broadcast_to(dLdOut[:, None], (BLOCK_SIZE_M, BLOCK_SIZE_N))
         dLdx += dLdOut * dOutdw * dwdz * dzdy * dydx

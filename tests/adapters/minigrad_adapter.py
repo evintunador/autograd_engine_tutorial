@@ -29,14 +29,8 @@ def _seeded_backward(out, grad_output):
 class MinigradAdapter(AdapterABC):
     name = "minigrad"
     OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu",
-           "softmax", "sum_lastdim", "mean", "var"}
+           "softmax", "sum_lastdim", "mean", "var", "std"}
     MODULES = {"linear", "embedding", "layernorm"}
-    # Known minigrad bug surfaced by this suite: Tensor.sum()'s backward
-    # (engine.py:220) broadcasts out.grad to self.shape without re-inserting the
-    # reduced last axis, so reductions over dim=-1 with keepdim=False crash on
-    # backward. mean/var are built on sum() and inherit it. Forward is fine.
-    _SUM_BUG = "minigrad Tensor.sum backward missing expand_dims for keepdim=False (engine.py:220)"
-    xfail_ops = {"sum_lastdim": _SUM_BUG, "mean": _SUM_BUG, "var": _SUM_BUG}
 
     @classmethod
     def available(cls):
@@ -85,6 +79,8 @@ class MinigradAdapter(AdapterABC):
             out = a.mean(dim=-1)
         elif op_name == "var":
             out = a.var(dim=-1)
+        elif op_name == "std":
+            out = a.sd(dim=-1)
         else:
             raise KeyError(op_name)
         return GraphHandle(out, inputs)

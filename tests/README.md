@@ -50,11 +50,19 @@ with per-op tolerances (loosened for matmul/linear/flash-attention, matching
 
 That's the only change — the registry and test files are untouched.
 
-## Known issues this suite currently documents (xfail)
+## Bugs this suite caught (now fixed)
 
-- `minigrad` `sum` / `mean` / `var` over the last dim (`keepdim=False`): the
-  backward in `minigrad/engine.py` broadcasts the upstream grad to the input shape
-  without re-inserting the reduced axis, so it raises. Forward is correct.
+- `minigrad` `sum`/`mean`/`var`/`std` backward over the last dim with
+  `keepdim=False` raised: the backward broadcast the upstream grad to the input
+  shape without re-inserting the reduced axis. Fixed in `minigrad/engine.py`.
+- `tritongrad` `var`/`std` forward subtracted `sum(x)` instead of `mean(x)` (a
+  missing `/ row_len`), and the forward/backward disagreed on the `n` vs `n-1`
+  normalization. Fixed to population variance throughout in
+  `tritongrad/kernels/vectorwise.py`.
+
+Backends declaring a known-broken-but-implemented op can still document it via an
+adapter's `xfail_ops` / `xfail_modules` (name → reason); the case runs but is
+recorded as an expected failure instead of blocking the suite.
 
 ## Note on the old inline tests
 

@@ -22,6 +22,7 @@ _OPS = {
     "sum_lastdim": lambda a: a.sum(dim=-1),
     "mean": lambda a: a.mean(dim=-1),
     "var": lambda a: a.var(dim=-1, unbiased=False),
+    "std": lambda a: a.std(dim=-1, unbiased=False),
 }
 
 

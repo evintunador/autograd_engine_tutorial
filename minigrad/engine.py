@@ -213,11 +213,14 @@ class Tensor:
         
     def sum(self, dim: int = -1, keepdim: bool = False):
         dim = self._safe_dim(dim)
-        out = Tensor(np.sum(self.data, axis = dim, keepdims=keepdim), 
+        out = Tensor(np.sum(self.data, axis = dim, keepdims=keepdim),
                      self.requires_grad, (self,))
         def _backward():
             if self.requires_grad:
-                self.grad += np.broadcast_to(out.grad, self.shape)
+                # when keepdim=False the reduced axis was dropped, so re-insert it
+                # before broadcasting the upstream gradient back to the input shape
+                g = out.grad if keepdim else np.expand_dims(out.grad, axis=dim)
+                self.grad += np.broadcast_to(g, self.shape)
         out._backward = _backward
         return out
     

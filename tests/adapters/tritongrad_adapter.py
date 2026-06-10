@@ -22,7 +22,7 @@ class TritongradAdapter(AdapterABC):
     # NOTE: no "softmax" — tritongrad's TritonTensor.softmax() is an unimplemented
     # stub (`pass`). Reductions are last-dim only, which the registry already uses.
     OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu",
-           "sum_lastdim", "mean", "var"}
+           "sum_lastdim", "mean", "var", "std"}
     MODULES = {"linear", "embedding", "layernorm", "attention"}
     # matmul/linear gradient accumulation and the many-op attention kernel are
     # sensitive at fp32, exactly as documented in tritongrad/testing.py.
@@ -31,14 +31,6 @@ class TritongradAdapter(AdapterABC):
         "linear": {"atol": 5e-2, "rtol": 1e5},
         "attention": {"atol": 2e-3, "rtol": 1e-1},
     }
-    # Known tritongrad bug surfaced by this suite: the var FORWARD reduction
-    # subtracts sum(x) instead of mean(x) (kernels/vectorwise.py:58 is missing the
-    # `/ row_len`), so the forward value is garbage. (The var backward kernel just
-    # below computes the mean correctly.) tritongrad also uses sample variance
-    # /(n-1) while torch's default is population /n.
-    xfail_ops = {"var": "tritongrad var forward subtracts sum(x) not mean(x) "
-                        "(kernels/vectorwise.py:58 missing /row_len)"}
-
     @classmethod
     def available(cls):
         try:
@@ -115,6 +107,8 @@ class TritongradAdapter(AdapterABC):
             out = a.mean()
         elif op_name == "var":
             out = a.var()
+        elif op_name == "std":
+            out = a.std()
         else:
             raise KeyError(op_name)
         return GraphHandle(out, inputs)
