@@ -88,8 +88,13 @@ class Embedding(Module):
 
     def __call__(self, tokens):
         B, N = tokens.shape
-        # TODO assert vals in tokens are all below num_embeddings
-        
+        # an out-of-range index would read garbage memory in the kernel (or silently
+        # wrap), so validate up front. .item() forces a host sync but this is a cheap
+        # safety net relative to the kernel launches that follow.
+        assert int(tokens.data.min().item()) >= 0 and int(tokens.data.max().item()) < self.num_embeddings, \
+            f"token indices must be in [0, {self.num_embeddings}) but got " \
+            f"range [{int(tokens.data.min().item())}, {int(tokens.data.max().item())}]"
+
         # pre-allocate output
         output = torch.empty(
             (B, N, self.embedding_dim), 
@@ -148,23 +153,26 @@ class LayerNorm(Module):
         self.eps = eps
         self.device = torch.device(f'cuda:{torch.cuda.current_device()}') if device is None else device
 
-        self.weight = Parameter(
-            data = torch.ones((normalized_shape,), device=device),
-            device = device
-        ) if elementwise_affine else None
-        self.bias = Parameter(
-            torch.zeros((normalized_shape,), device=device),
-            device = device
-        ) if elementwise_affine and bias else None
-        """
-        TODO rn the thing prolly breaks if you do elementwise_affine=False and/or bias=False.
-        to fix this you'd set it so that instead of initializing self.weight and self.bias to None,
-         they'd be TritonTensors with requires_grad = False but still the same 1's and 0's values.
-        that way we can still use the same fused kernel but not have it mess anything up in the graph
-         which yes is unnecessarily slow but i'm fs too lazy to write a whole separate kernel without 
-         the fused weights and biases when i know for a fact i'm never gonna use it.
-        so feel free to do that if you want
-        """
+        # The fused kernel always reads weight & bias and always writes their grads, so
+        # rather than write a second kernel for the affine-free case we keep weight/bias
+        # as plain (non-trainable) ones/zeros TritonTensors when the affine transform is
+        # disabled. They're given throwaway grad buffers so the kernel has a valid write
+        # target, and they're excluded from parameters() so the optimizer never touches
+        # them. This is slightly wasteful (it computes grads we discard) but keeps the
+        # single-kernel design — exactly the trade-off the original TODO called for.
+        if elementwise_affine:
+            self.weight = Parameter(torch.ones((normalized_shape,)), device=device)
+        else:
+            self.weight = TritonTensor(torch.ones((normalized_shape,)),
+                                       requires_grad=False, device=device)
+            self.weight.grad = torch.zeros((normalized_shape,), device=self.weight.device)
+
+        if elementwise_affine and bias:
+            self.bias = Parameter(torch.zeros((normalized_shape,)), device=device)
+        else:
+            self.bias = TritonTensor(torch.zeros((normalized_shape,)),
+                                     requires_grad=False, device=device)
+            self.bias.grad = torch.zeros((normalized_shape,), device=self.bias.device)
 
     def __call__(self, x: TritonTensor):
         D = x.shape[-1]
@@ -226,8 +234,9 @@ class LayerNorm(Module):
         return out
 
     def parameters(self):
-        return [self.weight] \
-                + ([self.bias] if self.bias is not None else [])
+        # weight/bias are always present now (ones/zeros when affine is off), so only
+        # the trainable Parameters get handed to the optimizer
+        return [p for p in (self.weight, self.bias) if isinstance(p, Parameter)]
 
     def __repr__(self):
         return f"nn.LayerNorm\nWeight:\n{self.weight}" + f"\nBias:\n{self.bias}" if self.bias is not None else ""

@@ -201,10 +201,14 @@ def matmul_bwd_dA(
         b_T_ptrs += BLOCK_SIZE_N * stride_b_n
         offsets_n += BLOCK_SIZE_N
 
-    # write back the block of the output matrix dA with masks
+    # write back the block of the output matrix dA with masks.
+    # atomic_add (rather than store) so that a single input feeding several matmuls
+    # — e.g. the attention input that feeds Wq, Wk AND Wv — accumulates the gradient
+    # from each instead of the launches clobbering one another. (Each (pid_m, pid_k)
+    # owns a unique output block, so there's no intra-launch contention.)
     da_ptrs = da_ptr + offsets_m.expand_dims(1) * stride_da_m + offsets_k.expand_dims(0) * stride_da_k
     da_mask = (offsets_m.expand_dims(1) < M) & (offsets_k.expand_dims(0) < K)
-    tl.store(da_ptrs, accumulator, mask=da_mask)
+    tl.atomic_add(da_ptrs, accumulator, mask=da_mask)
 
 
 @triton.autotune(configs = autotune_configs, key=['M', 'N', 'K'])

@@ -39,7 +39,7 @@ class TritonTensor:
             self.data = data.to(torch.float32) 
                 # we're enforcing our autograd engine only use fp32 for simplicity's sake
         else:
-            self.data = torch.tensor(data, dtype=dtorch.float32, requires_grad=False)
+            self.data = torch.tensor(data, dtype=torch.float32, requires_grad=False)
                 # requires_grad=False prevents pytorch from taking up memory by keeping track of its own gradient
         
         # Move tensor to specified device (default to CUDA if available)
@@ -151,9 +151,8 @@ class TritonTensor:
         return self._binary(other, op='div')
 
     def __neg__(self):
-        """Placeholder for negation"""
-        # TODO: Implement Triton kernel for negation
-        raise NotImplementedError("Negation kernel not yet implemented")
+        # negation is just another elementwise unary op (see kernels/elementwise.py)
+        return self._unary(op='neg')
 
     def __matmul__(self, other):
         """
@@ -344,7 +343,78 @@ class TritonTensor:
         return self._reduction(op='std')
 
     def softmax(self):
-        pass
+        """numerically-stable softmax along the final dimension, as a fused Triton kernel.
+        like our other vectorwise ops it assumes the final vector fits in SRAM"""
+        assert self.data.is_contiguous(), "softmax input must be contiguous"
+
+        # output is the same shape as the input (softmax is not a reduction)
+        output = torch.empty_like(self.data)
+
+        n_cols = self.shape[-1]
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        # 4 for the 4 bytes in fp32
+        assert BLOCK_SIZE_N * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_N * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        n_rows = self.data.numel() // n_cols
+        grid = lambda meta: (triton.cdiv(n_rows, meta['BLOCK_SIZE_M']), )
+        vectorwise.softmax_forward[grid](
+            self.data, output,
+            self.data.numel(),
+            self.data.stride()[-2], n_cols,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+
+        out = TritonTensor(output, requires_grad=self.requires_grad, _children=(self,))
+
+        def _backward():
+            if self.requires_grad:
+                vectorwise.softmax_backward[grid](
+                    out.data, self.grad, out.grad,
+                    self.data.numel(),
+                    self.data.stride()[-2], n_cols,
+                    BLOCK_SIZE_N=BLOCK_SIZE_N,
+                )
+        out._backward = _backward
+
+        return out
+
+    def argmax(self):
+        """index of the maximum entry along the final dimension, returned as a raw
+        torch int tensor of shape self.shape[:-1]. used for greedy inference, so it's
+        a non-differentiable forward-only op (there's no backward through an argmax)."""
+        n_cols = self.shape[-1]
+        output = torch.empty(self.shape[:-1], dtype=torch.int32, device=self.device, requires_grad=False)
+
+        BLOCK_SIZE_N = triton.next_power_of_2(n_cols)
+        assert BLOCK_SIZE_N * 4 < TOTAL_SRAM_PER_SM, \
+            f"vectors (each size {BLOCK_SIZE_N * 4}) too large to fit into SRAM size {TOTAL_SRAM_PER_SM}"
+
+        n_rows = self.data.numel() // n_cols
+        grid = lambda meta: (triton.cdiv(n_rows, meta['BLOCK_SIZE_M']), )
+        vectorwise.argmax_forward[grid](
+            self.data, output,
+            self.data.numel(), output.numel(),
+            self.data.stride()[-2], n_cols,
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+        )
+        return output
+
+    def contiguous(self):
+        """returns a contiguous copy (a no-op passthrough if already contiguous).
+        needed before FlashAttention, whose backward requires Q/K/V to share the
+        standard contiguous (B, H, N, Dh) stride layout. since the values are
+        unchanged, the gradient flows straight through."""
+        if self.data.is_contiguous():
+            return self
+        out = TritonTensor(self.data.contiguous(), self.requires_grad, self.device, (self,))
+        def _backward():
+            if self.requires_grad:
+                # logical (not physical) addition, so a contiguous out.grad accumulates
+                # correctly into self.grad even though self.grad keeps the original strides
+                self.grad += out.grad
+        out._backward = _backward
+        return out
 
     def transpose(self, dim0 = None, dim1 = None):
         # i don't care enough about shape operations to do custom kernels for them

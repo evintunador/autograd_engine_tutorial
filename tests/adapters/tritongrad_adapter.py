@@ -19,10 +19,11 @@ from tests.core.loader import load_backend
 
 class TritongradAdapter(AdapterABC):
     name = "tritongrad"
-    # NOTE: no "softmax" — tritongrad's TritonTensor.softmax() is an unimplemented
-    # stub (`pass`). Reductions are last-dim only, which the registry already uses.
-    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu",
-           "sum_lastdim", "mean", "var", "std"}
+    # softmax + neg are now implemented as real Triton kernels (see
+    # kernels/vectorwise.py and kernels/elementwise.py). Reductions are last-dim
+    # only, which the registry already uses.
+    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu", "neg",
+           "softmax", "sum_lastdim", "mean", "var", "std"}
     MODULES = {"linear", "embedding", "layernorm", "attention"}
     # matmul/linear gradient accumulation and the many-op attention kernel are
     # sensitive at fp32, exactly as documented in tritongrad/testing.py.
@@ -101,6 +102,10 @@ class TritongradAdapter(AdapterABC):
             out = a.log()
         elif op_name == "relu":
             out = a.relu()
+        elif op_name == "neg":
+            out = -a
+        elif op_name == "softmax":
+            out = a.softmax()
         elif op_name == "sum_lastdim":
             out = a.sum()
         elif op_name == "mean":

@@ -158,3 +158,130 @@ def reduction_op_backward(
     # Store result
     tl.store(dLdx_ptr + x_offsets, dLdx, mask=x_mask)
 
+
+########################################################################################
+########################### Softmax ####################################################
+########################################################################################
+# softmax is vector-wise like the reductions above (it operates along the final dim and
+# assumes the whole vector fits in SRAM) but unlike a reduction its output is the SAME
+# shape as the input rather than collapsing the final dim.
+
+@triton.autotune(
+    [
+        triton.Config({"BLOCK_SIZE_M": BLOCK_SIZE_M}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_M in [1, 2, 4, 8, 16, 32]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["x_num_elements"],
+)
+@triton.jit
+def softmax_forward(
+    x_ptr,
+    y_ptr,
+    x_num_elements,
+    stride_row,                     # places to move in memory to get to the same entry of the next row
+    row_len: tl.constexpr,          # length of the dim we softmax over; used to set BLOCK_SIZE_N
+    BLOCK_SIZE_M: tl.constexpr,     # the number of rows to hold in a block
+    BLOCK_SIZE_N: tl.constexpr,     # next power of 2 >= row_len, must fit in SRAM
+):
+    pid = tl.program_id(axis=0)
+
+    row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    col_idx = tl.arange(0, BLOCK_SIZE_N)
+    offsets = row_idx[:, None] * stride_row + col_idx[None, :]
+    mask = (row_idx[:, None] < (x_num_elements // row_len)) & (col_idx[None, :] < row_len)
+
+    # masked-out columns load a large negative so they (a) never win the max and
+    # (b) exponentiate to ~0 and thus contribute nothing to the denominator
+    x = tl.load(x_ptr + offsets, mask=mask, other=-1e9)
+
+    # numerically-stable softmax: subtract the row max before exponentiating
+    x_max = tl.max(x, axis=1)[:, None]                 # (BLOCK_SIZE_M, 1)
+    numerator = tl.exp(x - x_max)                       # (BLOCK_SIZE_M, BLOCK_SIZE_N)
+    denominator = tl.sum(numerator, axis=1)[:, None]    # (BLOCK_SIZE_M, 1)
+    y = numerator / denominator
+
+    tl.store(y_ptr + offsets, y, mask=mask)
+
+
+@triton.autotune(
+    [
+        triton.Config({"BLOCK_SIZE_M": BLOCK_SIZE_M}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_M in [1, 2, 4, 8, 16, 32]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["x_num_elements"],
+)
+@triton.jit
+def softmax_backward(
+    y_ptr,                          # the forward-pass softmax output (the probabilities)
+    dLdx_ptr,                       # input gradient we accumulate into
+    dLdy_ptr,                       # incoming upstream gradient
+    x_num_elements,
+    stride_row,
+    row_len: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    col_idx = tl.arange(0, BLOCK_SIZE_N)
+    offsets = row_idx[:, None] * stride_row + col_idx[None, :]
+    mask = (row_idx[:, None] < (x_num_elements // row_len)) & (col_idx[None, :] < row_len)
+
+    y = tl.load(y_ptr + offsets, mask=mask, other=0.)          # softmax probs
+    dLdy = tl.load(dLdy_ptr + offsets, mask=mask, other=0.)    # upstream grad
+
+    # the jacobian-vector product for softmax simplifies to
+    #   dLdx_i = y_i * (dLdy_i - sum_j(y_j * dLdy_j))
+    # the masked columns contribute 0 to the dot product since y=0 there
+    dot = tl.sum(y * dLdy, axis=1)[:, None]                    # (BLOCK_SIZE_M, 1)
+    dLdx_new = y * (dLdy - dot)
+
+    # accumulate (like the reduction backward) so the autotuner warmup dance applies
+    dLdx = tl.load(dLdx_ptr + offsets, mask=mask, other=0.)
+    tl.store(dLdx_ptr + offsets, dLdx + dLdx_new, mask=mask)
+
+
+########################################################################################
+########################### Argmax #####################################################
+########################################################################################
+# forward-only (no gradient flows through an argmax); used for greedy inference.
+
+@triton.autotune(
+    [
+        triton.Config({"BLOCK_SIZE_M": BLOCK_SIZE_M}, num_stages=num_stages, num_warps=num_warps,)
+        for BLOCK_SIZE_M in [1, 2, 4, 8, 16, 32]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4, 8]
+    ],
+    key=["x_num_elements"],
+)
+@triton.jit
+def argmax_forward(
+    x_ptr,
+    y_ptr,                          # int32 output of shape (n_rows,)
+    x_num_elements,
+    y_num_elements,
+    stride_row,
+    row_len: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+
+    row_idx = pid * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    col_idx = tl.arange(0, BLOCK_SIZE_N)
+    offsets = row_idx[:, None] * stride_row + col_idx[None, :]
+    mask = (row_idx[:, None] < (x_num_elements // row_len)) & (col_idx[None, :] < row_len)
+
+    # masked-out columns load a large negative so they can never be the argmax
+    x = tl.load(x_ptr + offsets, mask=mask, other=-1e9)
+    idx = tl.argmax(x, axis=1).to(tl.int32)               # (BLOCK_SIZE_M,)
+
+    store_mask = row_idx < y_num_elements
+    tl.store(y_ptr + row_idx, idx, mask=store_mask)
+

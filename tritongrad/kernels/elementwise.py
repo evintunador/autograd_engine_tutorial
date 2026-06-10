@@ -32,6 +32,8 @@ def unary_op_forward(
         tl.store(z_ptr + offsets, tl.log(x), mask=mask)
     if op == "relu":
         tl.store(z_ptr + offsets, tl.clamp(x, 0.0, 1e6), mask=mask)
+    if op == "neg":
+        tl.store(z_ptr + offsets, -x, mask=mask)
 
 
 @triton.autotune( # decorator figures out what meta-parameters will be most efficient
@@ -67,6 +69,9 @@ def unary_op_backward(
     if op == "relu":
         z = tl.load(z_ptr + offsets, mask=mask)
         tl.store(dx_ptr + offsets, (z > 0.0) * dz , mask=mask)
+    if op == "neg":
+        # d(-x)/dx = -1, so the incoming gradient is simply negated
+        tl.store(dx_ptr + offsets, -dz, mask=mask)
 
 
 
