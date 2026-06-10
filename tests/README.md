@@ -7,8 +7,7 @@ for both tensor ops and nn modules — forward *and* backward.
 ## Running
 
 ```bash
-pip install -r ../requirements.txt        # (adds pytest)
-cd ..                                      # run from the repo root
+pip install -r requirements.txt           # (adds pytest); run from the repo root
 pytest tests/                              # everything available on this machine
 pytest tests/ -k minigrad                  # one backend
 pytest tests/test_ops.py -k "minigrad and matmul"   # one (backend, op)
