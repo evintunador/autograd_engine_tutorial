@@ -1,5 +1,15 @@
-matplotlib==3.10.0
-numpy==2.2.3
-pytest==8.3.4
-torch==2.6.0
-triton==3.2.0
+# Unpinned — install the latest compatible versions.
+#
+# NOTE on GPUs: tritongrad needs a torch build with kernels for your card's
+# compute capability. On newer NVIDIA GPUs (Blackwell / RTX 50-series, sm_120+)
+# the default PyPI torch may lack them, giving "no kernel image is available for
+# execution on the device". In that case install torch/triton from the matching
+# CUDA wheel index instead, e.g. for CUDA 12.8:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch triton
+# (micrograd & minigrad are CPU-only and don't care; tritongrad tests skip when
+#  no usable CUDA GPU is present.)
+matplotlib
+numpy
+pytest
+torch
+triton
