@@ -44,6 +44,20 @@ class TritongradAdapter(AdapterABC):
             import triton  # noqa: F401
         except Exception as e:  # pragma: no cover
             return False, f"triton import failed: {e}"
+        # torch.cuda.is_available() can be True while the installed torch lacks
+        # compiled kernels for this GPU's compute capability (e.g. a Blackwell
+        # sm_120 card with a torch built only up to sm_90). A real kernel launch
+        # is the only reliable check; catch it here so the suite skips with an
+        # actionable message instead of failing every case.
+        try:
+            (torch.ones(8, device="cuda") + 1.0).sum().item()
+        except Exception as e:  # pragma: no cover
+            cap = "".join(str(x) for x in torch.cuda.get_device_capability())
+            return False, (
+                f"CUDA present but torch cannot launch kernels on this GPU "
+                f"(sm_{cap}): {e}. Install a torch build that supports it "
+                f"(e.g. --index-url https://download.pytorch.org/whl/cu128)."
+            )
         return True, ""
 
     def __init__(self):
