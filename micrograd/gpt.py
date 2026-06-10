@@ -14,17 +14,19 @@ def layer_norm(x):
     n = len(x)
     # mean
     mean = x[0] / n # for some reason sum() gives me an error so i do the addition manually
-    for xi in x[1:]: 
+    for xi in x[1:]:
         mean = mean + (xi / n)
-    # sd
+    # population variance
     tot = (x[0] - mean)**2
     for xi in x[1:]:
         tot = tot + (xi - mean)**2
-    sd = (tot / n) ** (-0.5)
+    var = tot / n
+    # reciprocal standard deviation (we multiply by this, i.e. divide by std)
+    rstd = (var + 1e-5) ** (-0.5)
     # normalization
     out = [None] * n
     for i in range(n):
-        out[i] = (x[i] - mean) / sd
+        out[i] = (x[i] - mean) * rstd
 
     return out
 
@@ -209,12 +211,13 @@ class GPT(Module):
         for layer in self.layers:
             x = layer(x, dropout_rate)
 
+        # the model outputs raw logits; CrossEntropyLoss applies log-softmax internally for
+        # numerical stability, and inference can softmax (or just argmax) the logits itself.
         logits = vector_wise_apply(self.output_proj, vector_wise_apply(layer_norm, x))
-        probabilities = vector_wise_apply(softmax, logits)
 
-        loss = self.criterion(probabilities, target_token_ids) if target_token_ids else None
-        
-        return probabilities, loss
+        loss = self.criterion(logits, target_token_ids) if target_token_ids else None
+
+        return logits, loss
 
 if __name__ == "__main__":
     batch_size = 2
@@ -281,6 +284,7 @@ if __name__ == "__main__":
     gpt = GPT(config)
     input_token_ids = [[r.randint(0, config['vocab_len'] - 1) for _ in range(config['max_seq_len'])] for _ in range(batch_size)]
     target_token_ids = [[r.randint(0, config['vocab_len'] - 1) for _ in range(config['max_seq_len'])] for _ in range(batch_size)]
-    probabilities, loss = gpt(input_token_ids, target_token_ids)
+    logits, loss = gpt(input_token_ids, target_token_ids)
+    probabilities = vector_wise_apply(softmax, logits)
     pretty_tensor_print(probabilities)
     print(loss)

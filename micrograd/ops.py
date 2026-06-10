@@ -229,6 +229,50 @@ def entry_wise_mult(x, y):
     # Recursively apply the entry-wise multiplication operation to the final dimension
     return recursive_entry_wise_mult(x, y)
 
+def entry_wise_sub(x, y):
+    '''
+    entry-wise subtraction function that does not support broadcasting, aka inputs must be same shapes
+
+    inputs:
+        x - list of lists of .... of Value objects
+        y - list of lists of .... of Value objects of the same shape as x
+    output:
+        out - list of lists of .... of Value objects of the same shape as x and y
+    '''
+    assert get_shape(x) == get_shape(y), f"tensors must have matching dimensions but instead have {get_shape(x)} and {get_shape(y)}"
+
+    # helper function to recursively apply entry-wise sub. this lets us move through a dynamic number of dimensions
+    def recursive_entry_wise_sub(sub_tensor_x, sub_tensor_y):
+        if isinstance(sub_tensor_x[0], list):
+            return [recursive_entry_wise_sub(sub_part_x, sub_part_y) for sub_part_x, sub_part_y in zip(sub_tensor_x, sub_tensor_y)]
+        else: # base case: the final vector dimension
+            return [xi - yi for xi, yi in zip(sub_tensor_x, sub_tensor_y)]
+
+    # Recursively apply the entry-wise subtraction operation to the final dimension
+    return recursive_entry_wise_sub(x, y)
+
+def entry_wise_div(x, y):
+    '''
+    entry-wise division function that does not support broadcasting, aka inputs must be same shapes
+
+    inputs:
+        x - list of lists of .... of Value objects
+        y - list of lists of .... of Value objects of the same shape as x
+    output:
+        out - list of lists of .... of Value objects of the same shape as x and y
+    '''
+    assert get_shape(x) == get_shape(y), f"tensors must have matching dimensions but instead have {get_shape(x)} and {get_shape(y)}"
+
+    # helper function to recursively apply entry-wise div. this lets us move through a dynamic number of dimensions
+    def recursive_entry_wise_div(sub_tensor_x, sub_tensor_y):
+        if isinstance(sub_tensor_x[0], list):
+            return [recursive_entry_wise_div(sub_part_x, sub_part_y) for sub_part_x, sub_part_y in zip(sub_tensor_x, sub_tensor_y)]
+        else: # base case: the final vector dimension
+            return [xi / yi for xi, yi in zip(sub_tensor_x, sub_tensor_y)]
+
+    # Recursively apply the entry-wise division operation to the final dimension
+    return recursive_entry_wise_div(x, y)
+
 def sum(vec):
     '''
     sums up all values in a vector
@@ -239,6 +283,63 @@ def sum(vec):
     for x in vec[1:]:
         tot = tot + x
     return tot
+
+def mean(vec):
+    '''
+    averages all values in a vector (matches torch's x.mean(dim=-1))
+    returns a single Value object, so via vector_wise_apply it removes the last dimension
+    '''
+    assert isinstance(vec, list) and isinstance(vec[0], (float, int, Value))
+    return sum(vec) / len(vec)
+
+def var(vec):
+    '''
+    population variance of a vector (matches torch's x.var(dim=-1, unbiased=False))
+    returns a single Value object, so via vector_wise_apply it removes the last dimension
+    '''
+    assert isinstance(vec, list) and isinstance(vec[0], (float, int, Value))
+    n = len(vec)
+    mu = mean(vec)
+    tot = (vec[0] - mu) ** 2
+    for x in vec[1:]:
+        tot = tot + (x - mu) ** 2
+    return tot / n
+
+def std(vec):
+    '''
+    population standard deviation of a vector (matches torch's x.std(dim=-1, unbiased=False))
+    returns a single Value object, so via vector_wise_apply it removes the last dimension
+    '''
+    return var(vec) ** 0.5
+
+def max(vec):
+    '''
+    returns the single largest Value in the vector. because we return the actual
+    Value object that won, gradient routes straight back to the arg-max element
+    (every other element's local derivative is 0) -- exactly matching torch's
+    x.max(dim=-1).values backward.
+    NOTE: this shadows python's builtin max() inside this module on purpose, the
+    same way sum() above does; we never need the builtin here.
+    '''
+    assert isinstance(vec, list) and isinstance(vec[0], (float, int, Value))
+    winner = vec[0]
+    for x in vec[1:]:
+        if x.data > winner.data:
+            winner = x
+    return winner
+
+def min(vec):
+    '''
+    returns the single smallest Value in the vector. gradient routes straight back
+    to the arg-min element, matching torch's x.min(dim=-1).values backward.
+    NOTE: shadows python's builtin min() inside this module on purpose.
+    '''
+    assert isinstance(vec, list) and isinstance(vec[0], (float, int, Value))
+    winner = vec[0]
+    for x in vec[1:]:
+        if x.data < winner.data:
+            winner = x
+    return winner
 
 def tensor_matmul(x, y):
     """
@@ -316,8 +417,12 @@ def softmax(vec):
     '''
     assert isinstance(vec, list), "vec should be a list of Value objects"
     assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
-    # Subtract the max value from each element for numerical stability
-    max_val = max(x.data for x in vec)
+    # Subtract the max value from each element for numerical stability.
+    # (computed manually rather than with builtin max() since max() is shadowed above)
+    max_val = vec[0].data
+    for x in vec[1:]:
+        if x.data > max_val:
+            max_val = x.data
     vec_shifted = [x - max_val for x in vec]
     # perform entry-wise exponentiation
     vec_exp = exp(vec_shifted)
@@ -325,6 +430,24 @@ def softmax(vec):
     sum_vec_exp = sum(vec_exp)
     # return a vector of each exponentiated entry divided by the sum
     return [x / sum_vec_exp for x in vec_exp]
+
+def log_softmax(vec):
+    '''
+    numerically-stable log(softmax(vec)) across the input vector. computing it in
+    one fused op (rather than log(softmax(x))) keeps the graph well-conditioned:
+    log_softmax(x)_i = (x_i - max) - log(sum_j exp(x_j - max))
+    '''
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    # subtract the max for numerical stability
+    max_val = vec[0].data
+    for x in vec[1:]:
+        if x.data > max_val:
+            max_val = x.data
+    vec_shifted = [x - max_val for x in vec]
+    # log of the denominator (the log-sum-exp)
+    log_sum_exp = sum(exp(vec_shifted)).log()
+    return [x - log_sum_exp for x in vec_shifted]
 
 def log(vec):
     '''

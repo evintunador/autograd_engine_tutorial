@@ -20,8 +20,9 @@ class MicrogradAdapter(AdapterABC):
     name = "micrograd"
     # core ops only; micrograd has no broadcasting, no dim-reductions beyond a
     # full last-dim sum, no shape ops, and only add/mul elementwise.
-    OPS = {"add", "mul", "matmul", "exp", "log", "relu", "softmax", "sum_lastdim"}
-    MODULES = {"linear", "embedding"}
+    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu", "softmax",
+           "sum_lastdim", "mean", "var", "std", "max_lastdim", "min_lastdim"}
+    MODULES = {"linear", "embedding", "layernorm"}
 
     @classmethod
     def available(cls):
@@ -78,8 +79,12 @@ class MicrogradAdapter(AdapterABC):
         b = inputs[1] if len(inputs) > 1 else None
         if op_name == "add":
             out = ops.entry_wise_add(a, b)
+        elif op_name == "sub":
+            out = ops.entry_wise_sub(a, b)
         elif op_name == "mul":
             out = ops.entry_wise_mult(a, b)
+        elif op_name == "div":
+            out = ops.entry_wise_div(a, b)
         elif op_name == "matmul":
             out = ops.tensor_matmul(a, b)
         elif op_name == "exp":
@@ -92,6 +97,16 @@ class MicrogradAdapter(AdapterABC):
             out = ops.vector_wise_apply(ops.softmax, a)
         elif op_name == "sum_lastdim":
             out = ops.vector_wise_apply(ops.sum, a)
+        elif op_name == "mean":
+            out = ops.vector_wise_apply(ops.mean, a)
+        elif op_name == "var":
+            out = ops.vector_wise_apply(ops.var, a)
+        elif op_name == "std":
+            out = ops.vector_wise_apply(ops.std, a)
+        elif op_name == "max_lastdim":
+            out = ops.vector_wise_apply(ops.max, a)
+        elif op_name == "min_lastdim":
+            out = ops.vector_wise_apply(ops.min, a)
         else:
             raise KeyError(op_name)
         return GraphHandle(out, inputs)
@@ -147,6 +162,30 @@ class MicrogradAdapter(AdapterABC):
             W_grad = np.array([[neuron.w[i].grad for i in range(in_dim)]
                                for neuron in mod.neurons], dtype=np.float32)
             b_grad = np.array([neuron.b.grad for neuron in mod.neurons], dtype=np.float32)
+            return ModuleResult(
+                out=self.to_numpy(out),
+                param_grads={"weight": W_grad, "bias": b_grad},
+                input_grads={0: self.grad_of(x)},
+            )
+
+        if spec.name == "layernorm":
+            dim = spec.config["dim"]
+            mod = modules.LayerNorm(dim)
+            # torch LayerNorm weight/bias are both 1-D of length `dim`; load directly.
+            W = ref_params["weight"]
+            bias = ref_params["bias"]
+            for d in range(dim):
+                mod.weight[d].data = float(W[d])
+                mod.bias[d].data = float(bias[d])
+
+            x = self.from_numpy(input_arrays[0].astype(np.float32))
+            out = ops.vector_wise_apply(mod, x)
+            self._seeded_backward(out, grad_output)
+
+            # weight/bias are shared across every normalized vector, so their grads
+            # accumulate over all positions -- matching torch's reduction.
+            W_grad = np.array([mod.weight[d].grad for d in range(dim)], dtype=np.float32)
+            b_grad = np.array([mod.bias[d].grad for d in range(dim)], dtype=np.float32)
             return ModuleResult(
                 out=self.to_numpy(out),
                 param_grads={"weight": W_grad, "bias": b_grad},

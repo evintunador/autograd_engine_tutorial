@@ -8,4 +8,4 @@ file guide:
 - `engine_lesson.py`: roughly equivalent to karpathy's own original lesson
 - `mlp_demo.py`: roughly equivalent to karpathy's own original lesson
 - `gpt_lesson.py`: the extension of karpathy's original lesson; takes up the bulk of [my own video]()
-- `train.py`: run it to train an absurdly tiny autoregressive GPT; when i say absurdly tiny i mean it's literally too small and slow to learn anything
+- `train.py`: run it to train a tiny autoregressive GPT; it's still small and slow (pure-python scalar autograd), so it overfits a small slice of the corpus to demonstrate that the engine actually learns (the loss falls well below the `ln(vocab_len)` untrained baseline)

@@ -1,13 +1,14 @@
 import time
+import math
 from ops import split_dim
 from gpt import GPT
 
 # load the dataset
-with open('input.txt', 'r', encoding='utf-8') as f:
+with open('../input.txt', 'r', encoding='utf-8') as f:
     tinyShakespeare_string = f.read()
 
-# an atrocious terrible no-good tokenizer
-unique_chars = set(tinyShakespeare_string)
+# an atrocious terrible no-good tokenizer (sorted so the mapping is deterministic run-to-run)
+unique_chars = sorted(set(tinyShakespeare_string))
 v = len(unique_chars)
 encode_dict, decode_dict = {}, {}
 for i, c in enumerate(unique_chars):
@@ -15,88 +16,97 @@ for i, c in enumerate(unique_chars):
     decode_dict[i] = c
 tinyShakespeare_chars = [encode_dict[c] for c in tinyShakespeare_string]
 
-# split into train vs validation datasets
-split_size = int(0.95 * len(tinyShakespeare_chars))
-train_dataset, val_dataset = tinyShakespeare_chars[:split_size], tinyShakespeare_chars[split_size:]
-
-# grab batch from datasets
-train_pointer, val_pointer = 0, 0
-def get_batch(batch_size, seq_len, val = False):
-    '''an atrocious terrible no-good way to get data batches'''
-    global train_pointer, val_pointer
-    tok_ct = batch_size * seq_len
-    dataset = val_dataset if val else train_dataset
-    pointer = val_pointer if val else train_pointer
-    input_toks = dataset[pointer:pointer + tok_ct] # grabbing sequential data is bad practice but whatever
-    target_toks = dataset[pointer + 1:pointer + tok_ct + 1]
-    if val:
-        val_pointer += tok_ct
-    else:
-        train_pointer += tok_ct
-    input_toks = split_dim(input_toks, (batch_size, seq_len))
-    target_toks = split_dim(target_toks, (batch_size, seq_len))
-    return input_toks, target_toks
-
-# define the model and all the hyperparameters
+# define the model and all the hyperparameters.
+# micrograd is pure-python scalar autograd, so every Value op is a slow Python object;
+# the model is therefore kept small and we train on a tiny slice to keep the demo snappy
+# while still clearly demonstrating that the engine learns.
 config = {
     'vocab_len':v,
-    'model_dim':4,
-    'max_seq_len':20,
-    'num_heads':2,
-    'head_dim':2,
-    'mlp_mult':2,
-    'dropout_rate':0.1,
-    'num_layers':1
+    'model_dim':16,
+    'max_seq_len':8,
+    'num_heads':4,
+    'head_dim':4,
+    'mlp_mult':4,
+    'dropout_rate':0.0,
+    'num_layers':2
 }
 model = GPT(config)
+print(f'vocab size: {v} | model parameters: {len(model.parameters())}')
 
-eta = 0.01 # learning rate
+eta = 0.3            # learning rate (kept modest so vanilla SGD descends smoothly)
+batch_size = 1
+seq_len = config['max_seq_len']
+toks_per_batch = batch_size * seq_len
 
-batch_size = 8
-toks_per_batch = batch_size * config['max_seq_len']
-train_iterations = min(split_size // toks_per_batch, 1000)
-val_iterations = min((len(tinyShakespeare_chars) - split_size) // toks_per_batch, 50)
-val_frequency = train_iterations // val_iterations
-print(f'train iterations: {train_iterations}, frequency of validation: {val_frequency}')
+# carve a small training set out of the front of the corpus and overfit it: because each
+# Value op is so expensive we can't sweep the whole 1M-character corpus, but cycling over a
+# tiny slice for many passes drives the loss far below the ln(vocab_len) baseline of an
+# untrained model -- and overfitting this hard means greedy decoding actually REPRODUCES the
+# memorized text, a clear end-to-end sanity check that gradients flow correctly. The corpus
+# starts "First Citizen", so the first 8-token window is "First Ci"; after overfitting,
+# greedily continuing the prompt "First" should regenerate "First Ci".
+num_batches = 1
+epochs = 30
+sample_every = 5
+
+def make_batches(n):
+    '''slice n consecutive (input, target) batches off the front of the corpus'''
+    batches = []
+    for b in range(n):
+        start = b * toks_per_batch
+        chunk = tinyShakespeare_chars[start:start + toks_per_batch + 1]
+        if len(chunk) < toks_per_batch + 1:
+            break
+        inp = split_dim(chunk[:toks_per_batch], (batch_size, seq_len))
+        tgt = split_dim(chunk[1:toks_per_batch + 1], (batch_size, seq_len))
+        batches.append((inp, tgt))
+    return batches
+
+batches = make_batches(num_batches)
+print(f'training on {len(batches)} batches for {epochs} epochs '
+      f'(untrained-model loss baseline ~= ln({v}) = {math.log(v):.2f})')
 
 # a very simple and nonrandom inference function
-def greedy_inference(model, input, gen_len):
-    gen_len = min(gen_len, config['max_seq_len'] - len(input) - 1)
-    toks = [[encode_dict[c] for c in input]]
-    for i in range(gen_len):
-        probabilities, _ = model(toks)
-        argmax = float('-inf')
-        argmax_idx = None
-        for i, val in enumerate(probabilities[0][-1]):
+def greedy_inference(model, prompt, gen_len):
+    gen_len = min(gen_len, config['max_seq_len'] - len(prompt))
+    toks = [[encode_dict[c] for c in prompt]]
+    for _ in range(gen_len):
+        logits, _ = model(toks)              # model now emits raw logits
+        last = logits[0][-1]                 # logits for the next token
+        # argmax over the logits == argmax over softmax(logits), so no need to normalize
+        argmax_idx, argmax = 0, float('-inf')
+        for j, val in enumerate(last):
             if val.data > argmax:
-                argmax_idx = i
-                argmax = val.data
+                argmax_idx, argmax = j, val.data
         toks[0].append(argmax_idx)
     return "".join(decode_dict[t] for t in toks[0])
 
 if __name__ == "__main__":
     start_time = time.time()
-    for i in range(train_iterations):
-        # forward pass
-        train_input_toks, train_target_toks = get_batch(batch_size, config['max_seq_len'])
-        probabilities, train_loss = model(train_input_toks, train_target_toks)
-            
-        if i % val_frequency == 0:
-            val_input_toks, val_target_toks = get_batch(batch_size, config['max_seq_len'], val = True)
-            probabilities, val_loss = model(val_input_toks, val_target_toks)
-            
-            print(f'step {i} | train loss: {train_loss.data:.2f} | val loss: {val_loss.data:.2f} | ' 
-                  f'time: {int(time.time() - start_time)}sec | example: {greedy_inference(model, "King Ri", 10)}')
-    
-        ## backward pass
-        #set param gradients to 0
-        for p in model.parameters():
-            p.grad = 0.0
-        # clac gradients
-        train_loss.backward()
-        # performing a step of SGD
-        for p in model.parameters():
-            p.data -= eta * p.grad
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for inp, tgt in batches:
+            # forward pass
+            _, loss = model(inp, tgt)
+            epoch_loss += loss.data
 
-    # a final display of wht the model has learned (not much)
-    greedy_inference(model, "King Ri", 10)
+            # backward pass
+            for p in model.parameters():
+                p.grad = 0.0
+            loss.backward()
+            # a step of vanilla SGD
+            for p in model.parameters():
+                p.data -= eta * p.grad
+
+        # sampling runs extra forward passes, so only do it occasionally
+        if epoch % sample_every == 0 or epoch == epochs - 1:
+            sample = greedy_inference(model, "First", 3)
+            print(f'epoch {epoch:2d} | mean train loss: {epoch_loss / len(batches):.3f} | '
+                  f'time: {int(time.time() - start_time)}sec | greedy("First")={sample!r}')
+        else:
+            print(f'epoch {epoch:2d} | mean train loss: {epoch_loss / len(batches):.3f} | '
+                  f'time: {int(time.time() - start_time)}sec')
+
+    # the corpus begins "First Citizen", so a model that has overfit batch 0 should
+    # greedily continue "First" -> "First Ci"
+    print(f'\nfinal greedy sample from "First": {greedy_inference(model, "First", 3)!r}')

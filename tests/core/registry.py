@@ -53,6 +53,8 @@ OP_REGISTRY = [
     OpSpec("mean", lambda g: [_std(g, S)], lambda x: x.mean(dim=-1)),
     OpSpec("var", lambda g: [_std(g, S)], lambda x: x.var(dim=-1, unbiased=False)),
     OpSpec("std", lambda g: [_std(g, S)], lambda x: x.std(dim=-1, unbiased=False)),
+    OpSpec("max_lastdim", lambda g: [_std(g, S)], lambda x: x.max(dim=-1).values),
+    OpSpec("min_lastdim", lambda g: [_std(g, S)], lambda x: x.min(dim=-1).values),
 ]
 
 
