@@ -65,11 +65,15 @@ print(f'train iterations: {train_iterations}, frequency of validation: {val_freq
 
 # a very simple and nonrandom inference function
 def greedy_inference(model, input, gen_len):
-    gen_len = min(gen_len, config['max_seq_len'] - len(input) - 1)
     toks = [encode_dict[c] for c in input]
+    gen_len = min(gen_len, config['max_seq_len'] - len(toks))
+    model.eval() # turn off dropout for inference
     for i in range(gen_len):
-        probabilities, _ = model(np.array([toks]))
-        toks.append(probabilities.max()[1][-1])
+        logits, _ = model(np.array([toks]))     # (1, len(toks), vocab_len)
+        probabilities = logits.softmax()        # logits -> probabilities (the inference path)
+        next_tok = int(np.argmax(probabilities.data[0, -1])) # greedily pick the last position's argmax
+        toks.append(next_tok)
+    model.train() # back to training mode
     return "".join(decode_dict[t] for t in toks)
 
 if __name__ == "__main__":

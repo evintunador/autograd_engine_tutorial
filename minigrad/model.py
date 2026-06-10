@@ -49,21 +49,13 @@ class MultiHeadSelfAttention(nn.Module):
         k = k.transpose((0,2,1,3))
         v = v.transpose((0,2,1,3))
 
-        # prepare keys for attention calc
-        k = k.transpose() # (b, nh, s, hd) -> (b, nh, hd, s)
-        # compute attention logits
-        logits = q @ k # (b, nh, s, hd) @ (b, nh, hd, s) -> (b, nh, s, s)
-        # scale logits
-        scaled_logits = logits * self.scale
-        # apply mask
-        masked_logits = scaled_logits.masked_fill(self.mask[:s,:s], float('-inf'))
-        # turn the logits into probability scores
-        scores = masked_logits.softmax()
+        # scaled dot-product attention with causal masking. Factored into nn so
+        # the test suite can exercise it directly against torch's SDPA.
+        output_values = nn.scaled_dot_product_attention(q, k, v, self.scale, self.mask[:s, :s])
+            # (b, nh, s, hd) -> (b, nh, s, hd)
         # dropout; if we're training then dropout_rate>0 but if doing inference it'll be set ==0 in the model class
-        scores = self.drop1(scores)
+        output_values = self.drop1(output_values)
 
-        # use scores to select from values
-        output_values = scores @ v # (b, nh, s, s) @ (b, nh, s, hd) -> (b, nh, s, hd)
         # rearrange back to be of size model_dim
         output_values = output_values.transpose((0,2,1,3)) # (b, nh, s, hd) -> (b, s, nh, hd)
         output_values = output_values.reshape((b, s, self.num_heads * self.head_dim)) # (b, s, nh, hd) -> (b, s, nh * hd)
@@ -137,12 +129,14 @@ class GPT(nn.Module):
                               self.criterion]
 
     def __call__(self, input_token_ids, target_token_ids = None):
+        # normalize a single (1-D) sequence up to a batch of one BEFORE unpacking,
+        # so callers can pass either (S,) or (B, S)
+        if input_token_ids.ndim == 1: # only one sequence passed in, aka batch_size==1
+            input_token_ids = input_token_ids[None, :] # (S,) -> (1, S)
         B, S = input_token_ids.shape
-        if input_token_ids.ndim == 1: # if only one sequence is passed in, aka batch_size==1
-            input_tokens = input_tokens.unsqueeze(0)
 
         if target_token_ids is not None: # if training
-            assert B, S == target_token_ids.shape
+            assert (B, S) == target_token_ids.shape
             assert S == self.max_seq_len
         else: # if inference
             assert S <= self.max_seq_len
@@ -154,14 +148,15 @@ class GPT(nn.Module):
         for layer in self.layers:
             x = layer(x)
 
+        # the model outputs raw logits; CrossEntropyLoss applies log-softmax
+        # internally and inference softmaxes the logits directly
         logits = self.output_proj(self.final_norm(x))
-        probabilities = logits.softmax()
 
         loss = None
         if target_token_ids is not None:
-            loss = self.criterion(probabilities, target_token_ids)
-        
-        return probabilities, loss
+            loss = self.criterion(logits, target_token_ids)
+
+        return logits, loss
 
 if __name__ == "__main__":
     b = 2
@@ -211,7 +206,7 @@ if __name__ == "__main__":
     gpt = GPT(config)
     input_token_ids = np.random.randint(0, config['vocab_len'], size=(batch_size, config['max_seq_len']))
     target_token_ids = np.random.randint(0, config['vocab_len'], size=(batch_size, config['max_seq_len']))
-    probabilities, loss = gpt(input_token_ids, target_token_ids)
+    logits, loss = gpt(input_token_ids, target_token_ids)
     loss.backward()
     print(loss)
-    print(probabilities)
+    print(logits)
