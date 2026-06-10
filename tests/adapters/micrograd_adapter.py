@@ -20,7 +20,7 @@ class MicrogradAdapter(AdapterABC):
     name = "micrograd"
     # core ops only; micrograd has no broadcasting, no dim-reductions beyond a
     # full last-dim sum, no shape ops, and only add/mul elementwise.
-    OPS = {"add", "sub", "mul", "div", "matmul", "exp", "log", "relu", "softmax",
+    OPS = {"add", "sub", "mul", "div", "neg", "matmul", "exp", "log", "relu", "softmax",
            "sum_lastdim", "mean", "var", "std", "max_lastdim", "min_lastdim"}
     MODULES = {"linear", "embedding", "layernorm"}
 
@@ -91,6 +91,8 @@ class MicrogradAdapter(AdapterABC):
             out = ops.vector_wise_apply(ops.exp, a)
         elif op_name == "log":
             out = ops.vector_wise_apply(ops.log, a)
+        elif op_name == "neg":
+            out = ops.vector_wise_apply(ops.neg, a)
         elif op_name == "relu":
             out = ops.vector_wise_apply(ops.relu, a)
         elif op_name == "softmax":

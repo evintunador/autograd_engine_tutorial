@@ -411,6 +411,14 @@ def exp(vec):
     assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
     return [x.exp() for x in vec]
 
+def neg(vec):
+    '''
+    negates all elements in the vector (relies on Value.__neg__)
+    '''
+    assert isinstance(vec, list), "vec should be a list of Value objects"
+    assert all(isinstance(x, Value) for x in vec), "All elements in vec must be Value objects"
+    return [-x for x in vec]
+
 def softmax(vec):
     '''
     performs the softmax operation across the input vector, giving us a list of probaiblities
