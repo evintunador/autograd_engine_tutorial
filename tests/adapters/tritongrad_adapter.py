@@ -31,6 +31,13 @@ class TritongradAdapter(AdapterABC):
         "linear": {"atol": 5e-2, "rtol": 1e5},
         "attention": {"atol": 2e-3, "rtol": 1e-1},
     }
+    # Known tritongrad bug surfaced by this suite: the var FORWARD reduction
+    # subtracts sum(x) instead of mean(x) (kernels/vectorwise.py:58 is missing the
+    # `/ row_len`), so the forward value is garbage. (The var backward kernel just
+    # below computes the mean correctly.) tritongrad also uses sample variance
+    # /(n-1) while torch's default is population /n.
+    xfail_ops = {"var": "tritongrad var forward subtracts sum(x) not mean(x) "
+                        "(kernels/vectorwise.py:58 missing /row_len)"}
 
     @classmethod
     def available(cls):
@@ -112,8 +119,23 @@ class TritongradAdapter(AdapterABC):
             raise KeyError(op_name)
         return GraphHandle(out, inputs)
 
+    def _seeded_backward(self, out, grad_output):
+        """Drive tritongrad's backward correctly under Triton autotuning.
+
+        tritongrad's backward kernels accumulate into ``.grad`` with ``+=``, and
+        Triton's autotuner runs each config many times on a kernel's first call —
+        so a naive single ``backward()`` adds the gradient thousands of times. We
+        first run a backward seeded with ZEROS (autotuning runs, but accumulates
+        nothing), reset all grads, then run the real backward once (configs now
+        cached). This mirrors the warmup dance in tritongrad/testing.py.
+        """
+        g = self._t(grad_output)
+        out.backward(self._torch.zeros_like(g))
+        out.zero_grad_backward()
+        out.backward(g)
+
     def backward(self, handle, grad_output):
-        handle.output.backward(self._t(grad_output))
+        self._seeded_backward(handle.output, grad_output)
 
     # ---- modules ----------------------------------------------------------
     def run_module(self, spec, ref_params, input_arrays, grad_output):
@@ -129,7 +151,7 @@ class TritongradAdapter(AdapterABC):
             mod.bias.grad = torch.zeros_like(mod.bias.data)
             x = self.from_numpy(input_arrays[0], requires_grad=True)
             out = mod(x)
-            out.backward(self._t(grad_output))
+            self._seeded_backward(out, grad_output)
             return ModuleResult(
                 out=self.to_numpy(out),
                 param_grads={"weight": mod.weight.grad.detach().cpu().numpy().T,
@@ -145,7 +167,7 @@ class TritongradAdapter(AdapterABC):
             weight = self.TritonTensor(self._t(ref_params["weight"]), requires_grad=True)
             mod.weight = weight
             out = mod(tokens)
-            out.backward(self._t(grad_output))
+            self._seeded_backward(out, grad_output)
             return ModuleResult(
                 out=self.to_numpy(out),
                 param_grads={"weight": weight.grad.detach().cpu().numpy()},
@@ -160,7 +182,7 @@ class TritongradAdapter(AdapterABC):
             mod.bias = bias
             x = self.from_numpy(input_arrays[0], requires_grad=True)
             out = mod(x)
-            out.backward(self._t(grad_output))
+            self._seeded_backward(out, grad_output)
             return ModuleResult(
                 out=self.to_numpy(out),
                 param_grads={"weight": weight.grad.detach().cpu().numpy(),
@@ -173,7 +195,7 @@ class TritongradAdapter(AdapterABC):
             k = self.from_numpy(input_arrays[1], requires_grad=True)
             v = self.from_numpy(input_arrays[2], requires_grad=True)
             out = nn.FlashAttention()(q, k, v, scale=spec.config["scale"])
-            out.backward(self._t(grad_output))
+            self._seeded_backward(out, grad_output)
             return ModuleResult(
                 out=self.to_numpy(out),
                 param_grads={},
