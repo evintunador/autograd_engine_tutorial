@@ -234,9 +234,37 @@ def matmul_backward_dB(grad_in, a, dout):
 # one thread per row (grid = n_rows); var/std use population (/n) normalization.
 _REDUCTION_OP = {"sum": 0, "mean": 1, "max": 2, "min": 3, "var": 4, "std": 5}
 
+# Vectorwise kernels run ONE THREADGROUP PER ROW: the threadgroup's threads
+# cooperatively reduce the row's columns via SIMD reductions (simd_sum/max/min)
+# + threadgroup memory + a grid-strided column loop. The threadgroup size is
+# chosen per-call from n_cols: a multiple of the 32-lane SIMD width, capped at
+# 256 (the scratch arrays in vectorwise.metal hold 256/32 = 8 simdgroup slots),
+# and at least 32. Narrow rows therefore use a SMALL threadgroup so many rows
+# stay resident concurrently (recovering the row-parallelism the simple
+# one-thread-per-row design had); wide rows use up to 256 threads to parallelize
+# the long column reduction. The kernel reads threads_per_threadgroup at runtime
+# (TPT) for the stride and derives the simdgroup count (NSG), so it stays correct
+# for any size we pick here.
+_VEC_SIMD = 32      # Apple GPU SIMD width
+_VEC_TG_MAX = 256   # must match the scratch-array bound (256/32 = 8) in the .metal
+
+
+def _vec_tg(n_cols):
+    """Threadgroup size (multiple of 32, in [32, 256]) for a row of n_cols."""
+    nc = max(int(n_cols), 1)
+    tg = ((nc + _VEC_SIMD - 1) // _VEC_SIMD) * _VEC_SIMD   # round up to 32
+    return max(_VEC_SIMD, min(_VEC_TG_MAX, tg))
+
+
+def _launch_rows(n_rows, n_cols):
+    """(grid, threadgroup): one threadgroup (sized to n_cols) per row."""
+    nr = max(int(n_rows), 1)
+    tg = _vec_tg(n_cols)
+    return (tg * nr, 1, 1), (tg, 1, 1)
+
 
 def reduction_forward(x, n_rows, n_cols, op):
-    grid, tg = _launch(n_rows)
+    grid, tg = _launch_rows(n_rows, n_cols)
     k = _kernel("vectorwise", "reduction_forward", ["x", "n_cols", "op"], ["out"])
     (out,) = k(inputs=[x, _u32(n_cols), _u32(_REDUCTION_OP[op])],
                grid=grid, threadgroup=tg,
@@ -245,7 +273,7 @@ def reduction_forward(x, n_rows, n_cols, op):
 
 
 def reduction_backward(grad_in, x, dout, out_fwd, n_rows, n_cols, op):
-    grid, tg = _launch(n_rows)
+    grid, tg = _launch_rows(n_rows, n_cols)
     k = _kernel("vectorwise", "reduction_backward",
                 ["grad_in", "x", "dout", "out_fwd", "n_cols", "op"], ["out"])
     (out,) = k(inputs=[grad_in, x, dout, out_fwd, _u32(n_cols), _u32(_REDUCTION_OP[op])],
@@ -255,7 +283,7 @@ def reduction_backward(grad_in, x, dout, out_fwd, n_rows, n_cols, op):
 
 
 def softmax_forward(x, n_rows, n_cols):
-    grid, tg = _launch(n_rows)
+    grid, tg = _launch_rows(n_rows, n_cols)
     k = _kernel("vectorwise", "softmax_forward", ["x", "n_cols"], ["out"])
     (out,) = k(inputs=[x, _u32(n_cols)],
                grid=grid, threadgroup=tg,
@@ -264,7 +292,7 @@ def softmax_forward(x, n_rows, n_cols):
 
 
 def softmax_backward(grad_in, out_fwd, dout, n_rows, n_cols):
-    grid, tg = _launch(n_rows)
+    grid, tg = _launch_rows(n_rows, n_cols)
     k = _kernel("vectorwise", "softmax_backward",
                 ["grad_in", "y", "dout", "n_cols"], ["out"])
     (out,) = k(inputs=[grad_in, out_fwd, dout, _u32(n_cols)],
