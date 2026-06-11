@@ -328,8 +328,20 @@ def embedding_backward(grad_in, tokens, dout, N, D, V):
     return out
 
 
+def _launch_rows(rows, D):
+    """(grid, threadgroup) for ONE THREADGROUP PER ROW: TG threads cooperatively
+    reduce each row over D. TG is a multiple of the 32-wide simd, capped so the
+    32-slot per-simdgroup partial buffers in the kernel suffice, and no larger
+    than D (rounded up to a simd) to avoid idle threads."""
+    rows = int(rows)
+    D = int(D)
+    tg = min(256, ((D + 31) // 32) * 32)
+    tg = max(32, tg)
+    return (rows * tg, 1, 1), (tg, 1, 1)
+
+
 def layernorm_forward(x, w, b, rows, D, eps):
-    grid, tg = _launch(rows)
+    grid, tg = _launch_rows(rows, D)
     k = _kernel("modules", "layernorm_forward",
                 ["x", "w", "b", "D", "epsb"], ["out", "mean", "rstd"])
     out, mean, rstd = k(inputs=[x, w, b, _u32(D), _f32(eps)],
@@ -340,8 +352,8 @@ def layernorm_forward(x, w, b, rows, D, eps):
 
 
 def layernorm_backward(x, w, b, dx_in, dw_in, db_in, dout, mean, rstd, rows, D):
-    # dx: one thread per row (functional accumulate into dx_in)
-    grid, tg = _launch(rows)
+    # dx: one threadgroup per row (functional accumulate into dx_in)
+    grid, tg = _launch_rows(rows, D)
     kdx = _kernel("modules", "layernorm_backward_dx",
                   ["dx_in", "x", "w", "dout", "mean", "rstd", "D"], ["out"])
     (dx,) = kdx(inputs=[dx_in, x, w, dout, mean, rstd, _u32(D)],

@@ -47,21 +47,57 @@ out[i] = acc;
 
 // @kernel layernorm_forward
 // out[r,:] = ((x[r,:] - mean) * rstd) * w + b ; also writes mean[r], rstd[r].
-// ONE THREAD PER ROW (grid = rows); each thread owns its row, no races.
-uint r = thread_position_in_grid.x;
+// ONE THREADGROUP PER ROW (grid = rows*TG, threadgroup = TG). The TG threads
+// cooperatively reduce the row over the feature dim D via a grid-strided loop
+// (so D > TG still works), a SIMD reduction (simd_sum), then a final reduce of
+// the per-simdgroup partials through threadgroup memory. Two passes: mean, then
+// the centered sum-of-squares for population (/D) variance.
+uint tid = thread_position_in_threadgroup.x;
+uint r = threadgroup_position_in_grid.x;
+uint tgsize = threads_per_threadgroup.x;
 uint D_ = D[0];
 float eps = epsb[0];
 uint base = r * D_;
+
+threadgroup float partial[32];   // <=32 simdgroups (TG<=1024); holds simd partials
+uint lane = thread_index_in_simdgroup;
+uint sgid = simdgroup_index_in_threadgroup;
+uint nsimd = (tgsize + 31u) / 32u;
+
+// --- pass 1: mean ---
 float s = 0.0f;
-for (uint d = 0; d < D_; ++d) s += x[base + d];
-float mu = s / (float)D_;
+for (uint d = tid; d < D_; d += tgsize) s += x[base + d];
+s = simd_sum(s);
+if (lane == 0) partial[sgid] = s;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (tid == 0) {
+    float tot = 0.0f;
+    for (uint i = 0; i < nsimd; ++i) tot += partial[i];
+    partial[0] = tot / (float)D_;        // store mean for broadcast
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+float mu = partial[0];
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+// --- pass 2: population variance ---
 float acc = 0.0f;
-for (uint d = 0; d < D_; ++d) { float diff = x[base + d] - mu; acc += diff * diff; }
-float var = acc / (float)D_;             // population (/D) normalization
-float rs = 1.0f / metal::sqrt(var + eps);
-mean[r] = mu;
-rstd[r] = rs;
-for (uint d = 0; d < D_; ++d) {
+for (uint d = tid; d < D_; d += tgsize) { float diff = x[base + d] - mu; acc += diff * diff; }
+acc = simd_sum(acc);
+if (lane == 0) partial[sgid] = acc;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (tid == 0) {
+    float tot = 0.0f;
+    for (uint i = 0; i < nsimd; ++i) tot += partial[i];
+    float var = tot / (float)D_;         // population (/D) normalization
+    partial[0] = 1.0f / metal::sqrt(var + eps);   // store rstd for broadcast
+    mean[r] = mu;
+    rstd[r] = partial[0];
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+float rs = partial[0];
+
+// --- normalize + affine (each thread writes its strided slice) ---
+for (uint d = tid; d < D_; d += tgsize) {
     float xhat = (x[base + d] - mu) * rs;
     out[base + d] = xhat * w[d] + b[d];
 }
@@ -69,25 +105,49 @@ for (uint d = 0; d < D_; ++d) {
 // @kernel layernorm_backward_dx
 // dx[r,d] = dx_in[r,d] + rstd[r]*(dxhat - c1 - xhat*c2)
 //   dxhat = dout[r,d]*w[d];  c1 = mean_d(dxhat);  c2 = mean_d(dxhat*xhat)
-// ONE THREAD PER ROW (grid = rows); uses mean[r]/rstd[r] saved in forward.
-uint r = thread_position_in_grid.x;
+// ONE THREADGROUP PER ROW (grid = rows*TG, threadgroup = TG); uses mean[r]/rstd[r]
+// saved in forward. TG threads cooperatively reduce c1,c2 over D (SIMD + tg-mem),
+// then each thread writes its grid-strided slice of dx.
+uint tid = thread_position_in_threadgroup.x;
+uint r = threadgroup_position_in_grid.x;
+uint tgsize = threads_per_threadgroup.x;
 uint D_ = D[0];
 uint base = r * D_;
 float mu = mean[r];
 float rs = rstd[r];
+
+threadgroup float p1[32];   // simd partials for c1
+threadgroup float p2[32];   // simd partials for c2
+threadgroup float cbroad[2];  // [0]=c1, [1]=c2 broadcast
+uint lane = thread_index_in_simdgroup;
+uint sgid = simdgroup_index_in_threadgroup;
+uint nsimd = (tgsize + 31u) / 32u;
+
 float c1 = 0.0f, c2 = 0.0f;
-for (uint d = 0; d < D_; ++d) {
+for (uint d = tid; d < D_; d += tgsize) {
     float xhat = (x[base + d] - mu) * rs;
     float dxhat = dout[base + d] * w[d];
     c1 += dxhat;
     c2 += dxhat * xhat;
 }
-c1 /= (float)D_;
-c2 /= (float)D_;
-for (uint d = 0; d < D_; ++d) {
+c1 = simd_sum(c1);
+c2 = simd_sum(c2);
+if (lane == 0) { p1[sgid] = c1; p2[sgid] = c2; }
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (tid == 0) {
+    float t1 = 0.0f, t2 = 0.0f;
+    for (uint i = 0; i < nsimd; ++i) { t1 += p1[i]; t2 += p2[i]; }
+    cbroad[0] = t1 / (float)D_;
+    cbroad[1] = t2 / (float)D_;
+}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+float cc1 = cbroad[0];
+float cc2 = cbroad[1];
+
+for (uint d = tid; d < D_; d += tgsize) {
     float xhat = (x[base + d] - mu) * rs;
     float dxhat = dout[base + d] * w[d];
-    out[base + d] = dx_in[base + d] + rs * (dxhat - c1 - xhat * c2);
+    out[base + d] = dx_in[base + d] + rs * (dxhat - cc1 - xhat * cc2);
 }
 
 // @kernel layernorm_backward_dwdb
