@@ -57,13 +57,46 @@ class CudaTensor:
         self.device = self.data.device
         self.numel = lambda: self.data.numel()
 
-        # Gradient state.
+        # Gradient state. We do NOT allocate the grad buffer here: a full-size
+        # ``zeros_like`` memset at construction is pure overhead for forward-only
+        # computations (which never touch ``.grad``). Since the benchmarks build
+        # ``requires_grad=True`` tensors for every op, that overhead is one (or
+        # several, for matmul) data-sized memsets per forward call — roughly
+        # halving measured elementwise forward bandwidth. So ``.grad`` is LAZY:
+        # the backing buffer is allocated-and-zeroed on first access (see the
+        # ``grad`` property below).
         self.requires_grad = requires_grad
-        self.grad = torch.zeros_like(self.data, requires_grad=False) if requires_grad else None
+        self._grad = None
 
         # Autograd graph.
         self._prev = set(_children)
         self._backward = lambda: None
+
+    @property
+    def grad(self):
+        """Lazily allocate the gradient buffer on first access.
+
+        WHY lazy: forward-only code never reads ``.grad``, so we never pay the
+        full-tensor ``zeros_like`` memset for it — the forward-path overhead this
+        eliminates. The accumulate-into-zeroed-buffer contract the backward
+        kernels rely on is preserved exactly: the FIRST access for a
+        ``requires_grad`` tensor creates a freshly-zeroed buffer of ``data``'s
+        shape, and every subsequent access returns that SAME persistent buffer,
+        so the backward kernels' ``+=`` / ``atomicAdd`` accumulation across
+        multiple ops still lands in one zeroed-then-accumulated tensor.
+
+        For ``requires_grad=False`` tensors we return ``None`` (never allocate),
+        matching the old behavior — unless a grad was explicitly assigned via the
+        setter (e.g. non-affine LayerNorm scratch grads), in which case we return
+        whatever was set.
+        """
+        if self._grad is None and self.requires_grad:
+            self._grad = torch.zeros_like(self.data)
+        return self._grad
+
+    @grad.setter
+    def grad(self, value):
+        self._grad = value
 
     def __repr__(self):
         return f"CudaTensor:\n{self.data}"
@@ -314,7 +347,11 @@ class CudaTensor:
         Unlike tritongrad, cudagrad needs NO warmup dance: our CUDA kernels don't
         autotune, so a single pass accumulates each grad exactly once into buffers
         that start at zero."""
-        self.grad = torch.ones_like(self.grad) if grad is None else grad
+        # root grad = ones of data's shape. We use ``self.data`` (not the lazy
+        # ``self.grad`` getter) so this doesn't first trigger a throwaway zeroed
+        # allocation just to read its shape; the result is identical since the
+        # lazy grad would be ``zeros_like(self.data)`` anyway.
+        self.grad = torch.ones_like(self.data) if grad is None else grad
         topo = []
         visited = set()
         def build_topo(v):
@@ -328,8 +365,15 @@ class CudaTensor:
             node._backward()
 
     def zero_grad_backward(self):
-        """Zero every grad in the graph reachable from this node."""
-        self.grad = torch.zeros_like(self.grad) if self.grad is not None else None
+        """Zero every grad in the graph reachable from this node.
+
+        We read/write ``node._grad`` directly (not the lazy ``.grad`` getter) so
+        we don't accidentally ALLOCATE a buffer for a node whose grad was never
+        materialized — there'd be nothing to zero, and the next backward would
+        lazily create a zeroed buffer anyway. Semantics are preserved exactly: a
+        node that already has a grad buffer gets a fresh zero buffer of the same
+        shape; a node with no grad (``_grad is None``) stays None."""
+        self._grad = torch.zeros_like(self._grad) if self._grad is not None else None
         topo = []
         visited = set()
         def build_topo(v):
@@ -340,7 +384,7 @@ class CudaTensor:
                 topo.append(v)
         build_topo(self)
         for node in reversed(topo):
-            node.grad = torch.zeros_like(node.grad) if node.grad is not None else None
+            node._grad = torch.zeros_like(node._grad) if node._grad is not None else None
 
 
 class Parameter(CudaTensor):

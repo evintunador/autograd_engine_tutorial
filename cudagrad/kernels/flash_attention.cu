@@ -1,34 +1,70 @@
 // Flash-attention CUDA kernels for cudagrad: CAUSAL attention fwd + bwd.
 //
-// This is NOT tritongrad's tiled online-softmax flash kernel. It is a
-// straightforward, obviously-correct CAUSAL attention computed per query row.
-// It is the project's CAUSAL-attention correctness reference, so it favours an
-// easy-to-verify decomposition over peak performance.
+// This is the project's CAUSAL-attention correctness reference. The FORWARD is
+// a tiled online-softmax flash kernel (the real performance win); the BACKWARD
+// is the obviously-correct cooperative block-per-output-row decomposition (a
+// correct backward + a fast forward beats a fragile fast backward).
 //
-// COOPERATIVE BLOCK-PER-ROW DESIGN
-// --------------------------------
-// The original code used ONE THREAD per (b,h,row): each thread serially walked
-// every key j and every channel d with uncoalesced global loads — ~150x slower
-// than PyTorch SDPA. This version launches ONE THREADBLOCK per output row and
-// lets `blockDim.x` threads (THREADS = 128) cooperate:
+// =====================================================================
+// FORWARD: QUERY-TILED ONLINE-SOFTMAX FLASH ATTENTION
+// =====================================================================
+// The previous forward processed ONE query row per block and therefore
+// re-read ALL of K and V from global memory for every single query row — that
+// HBM traffic was the bottleneck (~2% of PyTorch SDPA). The flash idea fixes
+// this by REUSING K/V tiles across many queries:
 //
-//   * grid.x = B*H*N, so block `idx` owns exactly one row. Decode i = idx % N,
-//     bh = idx / N (flat b*H+h). EVERY thread in a block shares the same `i`/`j`
-//     "owned" row, hence the causal loop bound (`j <= i` fwd/dQ, `i >= j`
-//     dV/dK) is IDENTICAL for all threads in the block — no divergent
-//     __syncthreads(), every thread reaches every barrier.
-//   * The "owned" query/key row is staged into __shared__ ONCE (dynamic shared
-//     mem, D floats) so the hot dot-product loop reads it from smem, not global.
-//   * Each dot product (Q_i.K_j, dO_i.V_j, ...) is split across threads over d,
-//     then combined with a warp-shuffle + cross-warp block reduction
-//     (block_reduce_sum). The scalar result is broadcast via shared mem.
-//   * Output accumulation over d (O[i,:], dQ[i,:], dV[j,:], dK[j,:]) is also
-//     split across threads over d. Since each BLOCK owns a DISTINCT output row,
-//     and within a block each d is written by exactly one thread, the `+=`
-//     accumulation is race-free WITHOUT atomics.
-//   * General D: every per-d loop is a grid-strided `for (d = tid; d < D; d +=
-//     blockDim.x)`, so D need not divide or be bounded by blockDim. Shared mem
-//     for the staged row is sized D*sizeof(float) at launch.
+//   * One block owns Br CONSECUTIVE query rows for a fixed (b,h).
+//     grid.x = B*H*ceil(N/Br). Decode the block's (b,h, query-tile) from
+//     blockIdx.x. blockDim.x = Br: thread r in the block owns query row
+//     q_row = qtile*Br + r (one thread = one query row).
+//   * The block loops over KEY TILES of Bc keys. Each K-tile and V-tile is
+//     loaded into shared memory ONCE (cooperatively by all Br threads) and
+//     then reused by ALL Br queries — so K/V are read from HBM O(N/Bc) times
+//     per (b,h) instead of O(N) times.
+//   * Each thread keeps its query's running online-softmax state in registers:
+//     m (running max), l (running denom), and an O accumulator acc[D] (D<=DMAX,
+//     held in a per-thread register/local array). After all key tiles:
+//     O = acc / l, LSE = m + log(l).
+//
+// CAUSAL TILE BOOKKEEPING (the easy place to get a bug):
+//   For query row i and key index j the contribution exists iff j <= i.
+//   Process key tiles kt = 0 .. ceil(N/Bc)-1, key index j = kt*Bc + c:
+//     * The whole block shares query rows [qtile*Br, qtile*Br + Br).
+//       The MAX query row owned by the block is qmax = qtile*Br + Br - 1
+//       (clamped to N-1). A key tile whose MINIMUM key index kt*Bc already
+//       exceeds qmax is strictly above the diagonal for EVERY query in the
+//       block -> skip the whole tile. Loop bound: kt*Bc <= qmax, i.e.
+//       kt <= qmax/Bc. This bound depends only on qtile (block-uniform), so
+//       every thread runs the SAME number of key-tile iterations -> all
+//       __syncthreads() are reached uniformly.
+//     * Within a kept tile, a (query i, key j) pair contributes iff
+//       j <= i AND j < N. We apply that as a per-element mask (score set to
+//       -inf when masked) rather than an early return, so barriers stay
+//       uniform. Tiles strictly BELOW the diagonal still get the cheap mask
+//       check; it is simply always true there.
+//
+// ONLINE-SOFTMAX RESCALING (must match the reference numerics so the backward,
+// which recomputes P = exp(scale*QK - LSE), stays consistent):
+//   For each new score s, m_new = max(m, s); correction = exp(m_old - m_new);
+//   l = l*correction + exp(s - m_new); acc[:] = acc[:]*correction + exp(s-m_new)*V[j,:].
+//   Equivalently we fold the whole tile's contributions in before rescaling
+//   once per key (mathematically identical to the canonical flash update). The
+//   FINAL LSE = m + log(l) uses the FINAL m,l — identical to the old two-pass
+//   kernel's result up to floating-point reassociation, well within tolerance.
+//
+// RACE-FREE WRITES: each query row's O and LSE is owned by exactly one thread
+// in exactly one block -> no atomics needed in the forward.
+//
+// =====================================================================
+// BACKWARD: COOPERATIVE BLOCK-PER-OUTPUT-ROW (unchanged, obviously correct)
+// =====================================================================
+// One THREADBLOCK per output row; blockDim.x threads cooperate over the channel
+// dim D. Each dot product is a warp-shuffle + cross-warp block reduction; output
+// accumulation splits over d. Because each block owns a DISTINCT output row and
+// each d is written by exactly one thread, the `+=` accumulation is race-free
+// WITHOUT atomics. The causal loop bound (`i >= j` for dV/dK, `j <= i` for dQ)
+// is identical for every thread in a block, so every __syncthreads() is reached
+// uniformly.
 //
 // Layout/contract notes (UNCHANGED — match precisely, this is a reference):
 //   * Q/K/V/O/dO/dQ/dK/dV are (B,H,N,D) contiguous fp32; LSE/Delta are (B,H,N).
@@ -45,11 +81,19 @@
 
 namespace {
 
-constexpr int THREADS = 128;            // threads per block (one block per row)
+constexpr int THREADS = 128;            // threads per block (backward: one block per row)
 constexpr int WARP = 32;
 constexpr int MAX_WARPS = THREADS / WARP;
 
-// ---- reductions -----------------------------------------------------------
+// ---- forward tiling parameters --------------------------------------------
+// Br query rows per block, Bc keys per key-tile. blockDim.x = Br in the forward.
+// DMAX caps the per-thread register O accumulator; the bench uses D=64, the test
+// D=32. 128 leaves headroom while keeping register pressure reasonable.
+constexpr int FWD_BR = 64;              // query rows per block (== forward blockDim.x)
+constexpr int FWD_BC = 32;              // keys per key-tile (keeps K/V smem modest)
+constexpr int FWD_DMAX = 128;           // max D supported by the register accumulator
+
+// ---- reductions (backward only) -------------------------------------------
 // Warp-level sum via shuffles: lane 0 of each warp ends up with the warp sum.
 __device__ __forceinline__ float warp_reduce_sum(float v) {
     #pragma unroll
@@ -79,18 +123,16 @@ __device__ __forceinline__ float block_reduce_sum(float v, float* scratch) {
     return out;
 }
 
-// (The forward's per-row max m_i is a serial fmaxf over the per-j scalar scores
-//  s_ij, which are themselves block_reduce_sum results — so no separate
-//  block-max reduction is needed.)
-
-// ---- forward --------------------------------------------------------------
-// One BLOCK per (b,h,i). Two-pass (numerically-stable) softmax:
-//   pass 1: m_i = max_{j<=i} scale*(Q_i.K_j)
-//   pass 2: l_i = Sum_{j<=i} exp(s_ij - m_i),  O[i,:] = Sum p_ij V[j,:] / l_i
-// Each dot product Q_i.K_j is a block reduction over d; O accumulation splits
-// over d. Q_i is staged in shared memory once.
+// ---- forward (tiled) -------------------------------------------------------
+// One BLOCK per (b,h, query-tile). blockDim.x = Br; thread r owns query row
+// q_row = qtile*Br + r. The block loops over key tiles of Bc keys, loading each
+// K/V tile to shared memory once and reusing it across all Br queries with the
+// standard online-softmax update.
 //
-// Dynamic shared layout: [ Qsh : D floats ][ scratch : MAX_WARPS floats ].
+// Dynamic shared layout (Br = blockDim.x, Bc = FWD_BC):
+//   [ Ksh : Bc*D floats ][ Vsh : Bc*D floats ]
+// Q rows are loaded straight to per-thread registers (q[d]); the O accumulator
+// acc[d] also lives in per-thread registers. D <= FWD_DMAX.
 __global__ void flash_forward_kernel(const float* __restrict__ Q,
                                      const float* __restrict__ K,
                                      const float* __restrict__ V,
@@ -98,55 +140,95 @@ __global__ void flash_forward_kernel(const float* __restrict__ Q,
                                      float* __restrict__ LSE,
                                      float scale,
                                      int64_t B, int64_t H, int64_t N, int64_t D) {
-    int64_t idx = blockIdx.x;            // one block per row
-    int64_t i   = idx % N;
-    int64_t bh  = idx / N;
-    int tid = threadIdx.x;
+    const int Br = blockDim.x;               // query rows per block
+    const int Bc = FWD_BC;                   // keys per tile
+    const int tid = threadIdx.x;             // local query index r in [0,Br)
 
-    extern __shared__ float smem[];
-    float* Qsh     = smem;               // D floats: staged query row
-    float* scratch = smem + D;           // MAX_WARPS floats: reduction scratch
+    // Decode this block's (b,h) and query-tile.
+    const int64_t n_qtiles = (N + Br - 1) / Br;
+    const int64_t bh    = blockIdx.x / n_qtiles;
+    const int64_t qtile = blockIdx.x % n_qtiles;
+    const int64_t q_row = qtile * Br + tid;  // global query row this thread owns
+    const bool active = (q_row < N);         // last tile may be partial
 
-    const float* Qrow  = Q + (bh * N + i) * D;
+    const float* Qbase = Q + bh * N * D;
     const float* Kbase = K + bh * N * D;
     const float* Vbase = V + bh * N * D;
-    float* Orow = O + (bh * N + i) * D;
+    float* Obase = O + bh * N * D;
 
-    // stage Q_i into shared memory (coalesced) and zero the output accumulator
-    for (int64_t d = tid; d < D; d += blockDim.x) {
-        Qsh[d]  = Qrow[d];
-        Orow[d] = 0.0f;
+    extern __shared__ float smem[];
+    float* Ksh = smem;                       // Bc*D floats
+    float* Vsh = smem + (int64_t)Bc * D;     // Bc*D floats
+
+    // Stage this thread's query row into registers. Inactive threads (padding in
+    // the last query-tile) load nothing but still participate in every barrier.
+    float q[FWD_DMAX];
+    float acc[FWD_DMAX];
+    if (active) {
+        const float* Qrow = Qbase + q_row * D;
+        for (int d = 0; d < D; ++d) { q[d] = Qrow[d]; acc[d] = 0.0f; }
+    } else {
+        for (int d = 0; d < D; ++d) { q[d] = 0.0f; acc[d] = 0.0f; }
     }
-    __syncthreads();
+    float m = -INFINITY;                     // running max for this query
+    float l = 0.0f;                          // running softmax denominator
 
-    // pass 1: running max of scores over j <= i (uniform bound for all threads)
-    float m = -INFINITY;
-    for (int64_t j = 0; j <= i; ++j) {
-        const float* Krow = Kbase + j * D;
-        float partial = 0.0f;
-        for (int64_t d = tid; d < D; d += blockDim.x) partial += Qsh[d] * Krow[d];
-        float s = block_reduce_sum(partial, scratch) * scale;
-        m = fmaxf(m, s);                 // identical on every thread (s is broadcast)
+    // Causal: the largest key index any query in this block can attend to is
+    // qmax = min(qtile*Br + Br - 1, N-1). Tiles whose first key index exceeds
+    // qmax are entirely above the diagonal -> skip. This bound is block-uniform.
+    int64_t qmax = qtile * (int64_t)Br + (int64_t)Br - 1;
+    if (qmax > N - 1) qmax = N - 1;
+    const int64_t last_kt = qmax / Bc;       // inclusive last key-tile index
+
+    for (int64_t kt = 0; kt <= last_kt; ++kt) {
+        const int64_t k0 = kt * Bc;          // first key index of this tile
+        // Cooperatively load the K and V tiles into shared memory. Bc*D elements
+        // each, strided by blockDim.x. Out-of-range keys (k0+c >= N) are left
+        // as-is and masked later via the score, so we still zero them to be safe.
+        for (int e = tid; e < Bc * D; e += blockDim.x) {
+            int c = e / D;                   // key-within-tile
+            int d = e % D;
+            int64_t kj = k0 + c;
+            if (kj < N) {
+                Ksh[e] = Kbase[kj * D + d];
+                Vsh[e] = Vbase[kj * D + d];
+            } else {
+                Ksh[e] = 0.0f;
+                Vsh[e] = 0.0f;
+            }
+        }
+        __syncthreads();                     // tile ready (uniform barrier)
+
+        // Each active thread folds this tile's Bc keys into its online softmax.
+        if (active) {
+            for (int c = 0; c < Bc; ++c) {
+                int64_t kj = k0 + c;
+                // CAUSAL + bounds mask: contributes iff kj <= q_row and kj < N.
+                if (kj > q_row || kj >= N) continue;
+                const float* Krow = Ksh + (int64_t)c * D;
+                float s = 0.0f;
+                for (int d = 0; d < D; ++d) s += q[d] * Krow[d];
+                s *= scale;
+                // online-softmax update with rescaling on a new running max
+                float m_new = fmaxf(m, s);
+                float corr  = expf(m - m_new);   // exp(m_old - m_new); 1 if m unchanged
+                float p     = expf(s - m_new);
+                l = l * corr + p;
+                const float* Vrow = Vsh + (int64_t)c * D;
+                for (int d = 0; d < D; ++d) acc[d] = acc[d] * corr + p * Vrow[d];
+                m = m_new;
+            }
+        }
+        __syncthreads();                     // all done reading tile before reload
     }
 
-    // pass 2: l_i and O[i,:] += exp(s_ij - m) * V[j,:]
-    float l = 0.0f;
-    for (int64_t j = 0; j <= i; ++j) {
-        const float* Krow = Kbase + j * D;
-        const float* Vrow = Vbase + j * D;
-        float partial = 0.0f;
-        for (int64_t d = tid; d < D; d += blockDim.x) partial += Qsh[d] * Krow[d];
-        float s = block_reduce_sum(partial, scratch) * scale;
-        float p = expf(s - m);
-        l += p;                          // identical on every thread
-        for (int64_t d = tid; d < D; d += blockDim.x) Orow[d] += p * Vrow[d];
+    // Finalize: O = acc / l, LSE = m + log(l). Each thread owns its own row.
+    if (active) {
+        float inv_l = 1.0f / l;
+        float* Orow = Obase + q_row * D;
+        for (int d = 0; d < D; ++d) Orow[d] = acc[d] * inv_l;
+        LSE[bh * N + q_row] = m + logf(l);
     }
-
-    // normalize: each d written by exactly one thread -> race-free
-    float inv_l = 1.0f / l;
-    for (int64_t d = tid; d < D; d += blockDim.x) Orow[d] *= inv_l;
-
-    if (tid == 0) LSE[bh * N + i] = m + logf(l);
 }
 
 // ---- backward: Delta ------------------------------------------------------
@@ -334,9 +416,15 @@ __global__ void flash_dK_kernel(const float* __restrict__ Q,
 void flash_attention_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
                              torch::Tensor O, torch::Tensor LSE, double scale,
                              int64_t B, int64_t H, int64_t N, int64_t D) {
-    int64_t total = B * H * N;           // one block per (b,h,row)
-    size_t smem = (D + MAX_WARPS) * sizeof(float);   // Qsh[D] + scratch[MAX_WARPS]
-    flash_forward_kernel<<<total, THREADS, smem>>>(
+    // Tiled forward: one block per (b,h, query-tile of FWD_BR rows); blockDim.x
+    // = FWD_BR (one thread per query row). Each block loops over key tiles of
+    // FWD_BC keys, staging K/V tiles in shared memory for reuse across queries.
+    const int Br = FWD_BR;
+    const int Bc = FWD_BC;
+    int64_t n_qtiles = (N + Br - 1) / Br;
+    int64_t blocks = B * H * n_qtiles;
+    size_t smem = (size_t)2 * Bc * D * sizeof(float);  // Ksh[Bc*D] + Vsh[Bc*D]
+    flash_forward_kernel<<<blocks, Br, smem>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(),
         O.data_ptr<float>(), LSE.data_ptr<float>(), (float)scale, B, H, N, D);
 }

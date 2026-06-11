@@ -1,16 +1,35 @@
 // Matmul CUDA kernels for cudagrad: forward + backward (dA, dB).
 //
-// Shared-memory TILED GEMM (tutorial; single-level tiling). Each threadblock
-// computes one TILE x TILE output tile. Threads cooperatively stage TILE-wide
-// sub-tiles of the two input operands into __shared__ memory, __syncthreads(),
-// then each thread accumulates the TILE-long partial dot product from shared
-// memory. Looping that over the contracted dimension in TILE-wide chunks builds
-// the full result. This reuses each loaded value TILE times (vs the naive
-// one-thread-per-output version that re-reads every operand from global memory),
-// which is the whole point of the optimization.
+// REGISTER-BLOCKED (a.k.a. thread-tiled) shared-memory GEMM (tutorial). This is
+// the standard next step up from single-element tiling and is the classic 2-4x
+// win, because it raises arithmetic intensity: each value loaded from shared
+// memory is reused across several outputs instead of just one.
 //
-// Each thread still owns a DISTINCT output element, so forward uses plain writes
-// and backward uses plain `+=` (read-modify-write) — NO atomics, NO races.
+// Two levels of tiling:
+//   * BLOCK TILE  (BM x BN): the chunk of the output matrix one threadblock owns.
+//     We contract over the shared dimension in BK-wide steps; for each step we
+//     cooperatively stage an A-subtile (BM x BK) and a B-subtile (BK x BN) into
+//     __shared__ memory.
+//   * MICRO TILE  (TM x TN): the small block of outputs ONE THREAD owns, held in
+//     a TM x TN register accumulator array. So the block has
+//     (BN/TN) x (BM/TM) threads. With BM=BN=64, TM=TN=4 that is 16x16 = 256
+//     threads, and each thread owns a 4x4 patch of the 64x64 output tile.
+//
+// Inner loop (the "outer product" accumulation): for each of the BK contraction
+// positions we load this thread's TM-long column slice of the A-subtile and its
+// TN-long row slice of the B-subtile into registers, then do the TM x TN
+// outer-product MACs into the accumulators. Each of those TM (resp. TN) register
+// values feeds TN (resp. TM) multiplies => the reuse that makes this fast.
+//
+// COOPERATIVE LOADS when #threads != #tile-elements: a block has BLOCK_THREADS
+// threads but each shared subtile has BM*BK (or BK*BN) elements, which need not
+// match. We flatten both the thread set and the subtile and walk the subtile in
+// strides of BLOCK_THREADS, so every element is loaded by exactly one thread and
+// each thread may load several. This is fully general for any of these counts.
+//
+// Each thread owns a DISTINCT set of output elements, so forward uses plain
+// writes and backward uses plain `+=` (read-modify-write) into pre-zeroed grads
+// — NO atomics, NO races.
 //
 // Layout/contract notes (all tensors contiguous, row-major, fp32):
 //   * A has shape (..., M, K); flatten the leading batch dims to Bsz.
@@ -30,15 +49,18 @@
 // The batch dimension is mapped onto blockIdx.z, so one grid covers all Bsz
 // batches; for the SHARED-B forward/dA kernels every batch reads the same B.
 //
-// CRITICAL: M, N, K are NOT assumed to be multiples of TILE (benchmark uses 384,
-// 1152, ...; tests use tiny sizes). Every global load is bounds-checked (loads
-// 0.0f into shared memory for out-of-range rows/cols, so the padded lanes
-// contribute nothing to the dot product) and every output write is guarded.
+// CRITICAL: M, N, K are NOT assumed to be multiples of the block/micro tiles
+// (benchmark uses 384, 1152, ...; tests use M=8,K=16,N=8). Every global load is
+// bounds-checked (loads 0.0f into shared memory for out-of-range rows/cols, so
+// the padded lanes contribute nothing to the dot product) and every output write
+// is guarded. All threads of a block run the same loop trip counts (they depend
+// only on the uniform M/N/K), so every __syncthreads() is reached uniformly —
+// we never early-return a thread before a sync.
 //
 // Backward launchers ACCUMULATE into zero-initialized grads (`+=`). For the
 // SHARED-B case the dB kernel sums over BOTH the batch and M dims (that batch
 // sum is exactly what makes the linear-layer weight grad correct) — preserved
-// here by looping the K-contraction tiles over (Bsz * M) flattened rows.
+// here by looping the M-contraction over every batch into the one (K,N) grad.
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -46,173 +68,353 @@
 
 namespace {
 
-constexpr int TILE = 16;  // TILE x TILE output tile == TILE x TILE threadblock.
+// Block tile / micro tile / contraction step. blockDim is (BN/TN, BM/TM).
+constexpr int BM = 64;            // output rows per block tile
+constexpr int BN = 64;            // output cols per block tile
+constexpr int BK = 8;             // contraction step
+constexpr int TM = 4;             // output rows per thread (micro-tile height)
+constexpr int TN = 4;             // output cols per thread (micro-tile width)
+constexpr int BLOCK_DIM_X = BN / TN;             // 16
+constexpr int BLOCK_DIM_Y = BM / TM;             // 16
+constexpr int BLOCK_THREADS = BLOCK_DIM_X * BLOCK_DIM_Y;  // 256
+
+// ===========================================================================
+// Generic register-blocked tile engine.
+//
+// Every one of the three kernels is the same shape: an output matrix
+//   OUT[row, col]  with  row in [0, ROWS), col in [0, COLS)
+// formed by contracting over CONTRACT, reading from two operands:
+//   LHS[row, c]    (the "A side", indexed [output-row][contract])
+//   RHS[c, col]    (the "B side", indexed [contract][output-col])
+// so that OUT[row,col] += Σ_c LHS[row,c] * RHS[c,col].
+//
+// This helper accumulates ONE block tile's worth of that product (BM x BN
+// outputs owned by the block, this thread owning a TM x TN micro-tile) into the
+// `acc[TM][TN]` register array. It bounds-checks every global load against the
+// caller-supplied extents. The caller supplies row-major strides + base offsets
+// for LHS and RHS so the same engine serves all three operand layouts.
+//
+//   lhs[r, c] = lhs_ptr[lhs_base + (block_row_base + r) * lhs_rs + c]   (r is an
+//               output-row offset within the tile, c a contraction offset)
+//   rhs[c, n] = rhs_ptr[rhs_base + c * rhs_rs + (block_col_base + n)]   (n is an
+//               output-col offset within the tile)
+//
+// block_row_base = blockIdx.y * BM, block_col_base = blockIdx.x * BN. The caller
+// passes the contraction extent CONTRACT and the row/col extents (ROWS, COLS)
+// for bounds-checking.
+// ===========================================================================
+__device__ __forceinline__ void tile_engine(
+        const float* __restrict__ lhs_ptr, int64_t lhs_base, int64_t lhs_rs,
+        const float* __restrict__ rhs_ptr, int64_t rhs_base, int64_t rhs_rs,
+        int64_t ROWS, int64_t COLS, int64_t CONTRACT,
+        int64_t block_row_base, int64_t block_col_base,
+        float acc[TM][TN]) {
+    __shared__ float As[BM][BK];   // LHS subtile: [output-row][contract]
+    __shared__ float Bs[BK][BN];   // RHS subtile: [contract][output-col]
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;  // 0..BLOCK_THREADS-1
+
+    // This thread's micro-tile origin inside the block tile.
+    const int thread_row0 = threadIdx.y * TM;   // 0..BM-TM
+    const int thread_col0 = threadIdx.x * TN;   // 0..BN-TN
+
+    int64_t n_steps = (CONTRACT + BK - 1) / BK;
+    for (int64_t t = 0; t < n_steps; ++t) {
+        int64_t c_base = t * BK;   // contraction offset for this step
+
+        // --- Cooperative load of the LHS subtile (BM x BK) -----------------
+        // Flatten the BM*BK elements; each thread strides by BLOCK_THREADS.
+        for (int i = tid; i < BM * BK; i += BLOCK_THREADS) {
+            int r = i / BK;                 // output-row within tile
+            int c = i % BK;                 // contraction within step
+            int64_t gr = block_row_base + r;
+            int64_t gc = c_base + c;
+            As[r][c] = (gr < ROWS && gc < CONTRACT)
+                       ? lhs_ptr[lhs_base + gr * lhs_rs + gc]
+                       : 0.0f;
+        }
+        // --- Cooperative load of the RHS subtile (BK x BN) -----------------
+        for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
+            int c = i / BN;                 // contraction within step
+            int n = i % BN;                 // output-col within tile
+            int64_t gc = c_base + c;
+            int64_t gn = block_col_base + n;
+            Bs[c][n] = (gc < CONTRACT && gn < COLS)
+                       ? rhs_ptr[rhs_base + gc * rhs_rs + gn]
+                       : 0.0f;
+        }
+
+        __syncthreads();   // both subtiles fully staged
+
+        // --- Outer-product accumulation over the BK contraction positions --
+        #pragma unroll
+        for (int cc = 0; cc < BK; ++cc) {
+            float a_reg[TM];   // this thread's TM-long slice of A's column cc
+            float b_reg[TN];   // this thread's TN-long slice of B's row cc
+            #pragma unroll
+            for (int i = 0; i < TM; ++i) a_reg[i] = As[thread_row0 + i][cc];
+            #pragma unroll
+            for (int j = 0; j < TN; ++j) b_reg[j] = Bs[cc][thread_col0 + j];
+            #pragma unroll
+            for (int i = 0; i < TM; ++i)
+                #pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    acc[i][j] += a_reg[i] * b_reg[j];
+        }
+
+        __syncthreads();   // done reading shared before next step overwrites it
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FORWARD: C[b,m,n] = Σ_k A[b,m,k] · B[(b),k,n]
-// Output tile is (M,N); we contract over K. One block -> one TILE x TILE tile
-// of C for one batch (blockIdx.z). threadIdx.(y,x) -> (row-in-tile, col-in-tile).
+// OUT=(M,N), contract K. LHS = A[b] (row=m, c=k, rs=K); RHS = B[(b)] (c=k,
+// col=n, rs=N). blockIdx.z -> batch.
 // ---------------------------------------------------------------------------
 __global__ void matmul_forward_kernel(const float* __restrict__ A,
                                      const float* __restrict__ B,
                                      float* __restrict__ C,
                                      int64_t Bsz, int64_t M, int64_t K, int64_t N,
                                      int shared) {
-    int64_t b = blockIdx.z;                              // batch this block owns
-    int64_t row = (int64_t)blockIdx.y * TILE + threadIdx.y;  // m
-    int64_t col = (int64_t)blockIdx.x * TILE + threadIdx.x;  // n
+    int64_t b = blockIdx.z;
+    int64_t block_row_base = (int64_t)blockIdx.y * BM;   // m base
+    int64_t block_col_base = (int64_t)blockIdx.x * BN;   // n base
 
-    const float* Abatch = A + b * M * K;                 // A[b,:,:]
-    const float* Bbase = shared ? B : (B + b * K * N);   // B[(b),:,:]
+    int64_t lhs_base = b * M * K;                        // A[b,:,:]
+    int64_t rhs_base = shared ? 0 : b * K * N;           // B[(b),:,:]
 
-    __shared__ float As[TILE][TILE];   // staged A[b, row, k-chunk]
-    __shared__ float Bs[TILE][TILE];   // staged B[(b), k-chunk, col]
-
-    float acc = 0.0f;
-    int64_t n_chunks = (K + TILE - 1) / TILE;            // K-tiles to walk
-    for (int64_t t = 0; t < n_chunks; ++t) {
-        int64_t k_a = t * TILE + threadIdx.x;            // k index for A's load
-        int64_t k_b = t * TILE + threadIdx.y;            // k index for B's load
-
-        // Bounds-check each load; pad with 0.0f so out-of-range lanes are inert.
-        As[threadIdx.y][threadIdx.x] =
-            (row < M && k_a < K) ? Abatch[row * K + k_a] : 0.0f;
-        Bs[threadIdx.y][threadIdx.x] =
-            (k_b < K && col < N) ? Bbase[k_b * N + col] : 0.0f;
-
-        __syncthreads();                                 // tile fully staged
-
+    float acc[TM][TN];
+    #pragma unroll
+    for (int i = 0; i < TM; ++i)
         #pragma unroll
-        for (int kk = 0; kk < TILE; ++kk) {
-            acc += As[threadIdx.y][kk] * Bs[kk][threadIdx.x];
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
+
+    tile_engine(A, lhs_base, /*lhs_rs=*/K,
+                B, rhs_base, /*rhs_rs=*/N,
+                /*ROWS=*/M, /*COLS=*/N, /*CONTRACT=*/K,
+                block_row_base, block_col_base, acc);
+
+    // Write the TM x TN micro-tile; every element bounds-checked (distinct elem).
+    int thread_row0 = threadIdx.y * TM;
+    int thread_col0 = threadIdx.x * TN;
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        int64_t m = block_row_base + thread_row0 + i;
+        if (m >= M) continue;
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            int64_t n = block_col_base + thread_col0 + j;
+            if (n < N) C[(b * M + m) * N + n] = acc[i][j];
         }
-
-        __syncthreads();                                 // done before reload
-    }
-
-    if (row < M && col < N) {
-        C[(b * M + row) * N + col] = acc;                // distinct elem -> write
     }
 }
 
 // ---------------------------------------------------------------------------
 // dA: dA[b,m,k] += Σ_n dC[b,m,n] · B[(b),k,n]   == dC @ B^T
-// Output tile is (M,K); we contract over N. blockIdx.z -> batch.
-// threadIdx.(y,x) -> (row-in-tile = m, col-in-tile = k).
-// We stage a TILE-wide chunk of dC[b, m, n] and of B[(b), k, n], indexed so that
-// the shared-memory dot product runs over n.
+// OUT=(M,K), contract N. LHS = dC[b] (row=m, contract=n, rs=N) — plain row-major.
+// RHS wants rhs[c=n][col=k] = B[(b),k,n], but B is stored row-major as
+// B[k*N + n], i.e. TRANSPOSED relative to the generic engine's
+// rhs[c][col] = base + c*rhs_rs + col (which assumes unit col stride). The
+// transpose can't be expressed through that addressing, so dA uses its own
+// engine variant whose RHS cooperative load reads B[gk*N + gn] into Bs[n][k].
+// blockIdx.z -> batch. threadIdx maps to (m micro-rows, k micro-cols).
 // ---------------------------------------------------------------------------
+__device__ __forceinline__ void tile_engine_dA(
+        const float* __restrict__ dC, int64_t dc_base,   // dC[b], row=m, c=n, rs=N
+        const float* __restrict__ B, int64_t b_base,     // B[(b)], B[k,n]=base+k*N+n
+        int64_t M, int64_t K, int64_t N,
+        int64_t block_row_base, int64_t block_col_base,  // m base, k base
+        float acc[TM][TN]) {
+    __shared__ float dCs[BM][BK];  // [m within tile][n within step]
+    __shared__ float Bs[BK][BN];   // [n within step][k within tile]
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int thread_row0 = threadIdx.y * TM;   // m offset in tile
+    const int thread_col0 = threadIdx.x * TN;   // k offset in tile
+
+    int64_t n_steps = (N + BK - 1) / BK;         // contract over N
+    for (int64_t t = 0; t < n_steps; ++t) {
+        int64_t c_base = t * BK;                 // n offset for this step
+
+        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]
+        for (int i = tid; i < BM * BK; i += BLOCK_THREADS) {
+            int r = i / BK;            // m within tile
+            int c = i % BK;            // n within step
+            int64_t gm = block_row_base + r;
+            int64_t gn = c_base + c;
+            dCs[r][c] = (gm < M && gn < N) ? dC[dc_base + gm * N + gn] : 0.0f;
+        }
+        // Bs[n][k] = B[(b), k, n] = B[b_base + k*N + n]   (transposed load)
+        for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
+            int c = i / BN;            // n within step
+            int n_k = i % BN;          // k within tile
+            int64_t gn = c_base + c;
+            int64_t gk = block_col_base + n_k;
+            Bs[c][n_k] = (gn < N && gk < K) ? B[b_base + gk * N + gn] : 0.0f;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int cc = 0; cc < BK; ++cc) {     // cc indexes n within the step
+            float a_reg[TM];   // dC slice over m
+            float b_reg[TN];   // B slice over k
+            #pragma unroll
+            for (int i = 0; i < TM; ++i) a_reg[i] = dCs[thread_row0 + i][cc];
+            #pragma unroll
+            for (int j = 0; j < TN; ++j) b_reg[j] = Bs[cc][thread_col0 + j];
+            #pragma unroll
+            for (int i = 0; i < TM; ++i)
+                #pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    acc[i][j] += a_reg[i] * b_reg[j];
+        }
+
+        __syncthreads();
+    }
+}
+
 __global__ void matmul_backward_dA_kernel(const float* __restrict__ B,
                                          float* __restrict__ dA,
                                          const float* __restrict__ dC,
                                          int64_t Bsz, int64_t M, int64_t K,
                                          int64_t N, int shared) {
     int64_t b = blockIdx.z;
-    int64_t row = (int64_t)blockIdx.y * TILE + threadIdx.y;  // m
-    int64_t col = (int64_t)blockIdx.x * TILE + threadIdx.x;  // k
+    int64_t block_row_base = (int64_t)blockIdx.y * BM;   // m base
+    int64_t block_col_base = (int64_t)blockIdx.x * BN;   // k base
 
-    const float* dCbatch = dC + b * M * N;               // dC[b,:,:]
-    const float* Bbase = shared ? B : (B + b * K * N);   // B[(b),:,:]
+    int64_t dc_base = b * M * N;
+    int64_t b_base = shared ? 0 : b * K * N;
 
-    __shared__ float dCs[TILE][TILE];  // staged dC[b, row, n-chunk]
-    __shared__ float Bs[TILE][TILE];   // staged B[(b), col=k, n-chunk]
-
-    float acc = 0.0f;
-    int64_t n_chunks = (N + TILE - 1) / TILE;            // N-tiles to walk
-    for (int64_t t = 0; t < n_chunks; ++t) {
-        int64_t n_dc = t * TILE + threadIdx.x;           // n for dC load
-        int64_t n_b = t * TILE + threadIdx.x;            // n for B load
-
-        // dCs[row-in-tile][n-in-tile] = dC[b, row, n]
-        dCs[threadIdx.y][threadIdx.x] =
-            (row < M && n_dc < N) ? dCbatch[row * N + n_dc] : 0.0f;
-        // Bs[k-in-tile][n-in-tile] = B[(b), k=col, n]   (k from blockIdx.y? no:
-        // here the y index of this tile addresses the k owned by this block's
-        // columns; threadIdx.y picks the k row of the B tile).
-        int64_t k_b = (int64_t)blockIdx.x * TILE + threadIdx.y;
-        Bs[threadIdx.y][threadIdx.x] =
-            (k_b < K && n_b < N) ? Bbase[k_b * N + n_b] : 0.0f;
-
-        __syncthreads();
-
-        // acc += Σ_n dC[b,row,n] · B[(b),col,n].  dCs is indexed [m][n];
-        // Bs is indexed [k][n]; this thread's k is threadIdx.x.
+    float acc[TM][TN];
+    #pragma unroll
+    for (int i = 0; i < TM; ++i)
         #pragma unroll
-        for (int nn = 0; nn < TILE; ++nn) {
-            acc += dCs[threadIdx.y][nn] * Bs[threadIdx.x][nn];
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
+
+    tile_engine_dA(dC, dc_base, B, b_base, M, K, N,
+                   block_row_base, block_col_base, acc);
+
+    int thread_row0 = threadIdx.y * TM;   // m
+    int thread_col0 = threadIdx.x * TN;   // k
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        int64_t m = block_row_base + thread_row0 + i;
+        if (m >= M) continue;
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            int64_t k = block_col_base + thread_col0 + j;
+            if (k < K) dA[(b * M + m) * K + k] += acc[i][j];   // ACCUMULATE
         }
-
-        __syncthreads();
-    }
-
-    if (row < M && col < K) {
-        dA[(b * M + row) * K + col] += acc;              // ACCUMULATE
     }
 }
 
 // ---------------------------------------------------------------------------
 // dB: dB[(b),k,n] += Σ_m A[b,m,k] · dC[b,m,n]   == A^T @ dC
-// Output tile is (K,N); we contract over M (and, for SHARED B, over the batch).
-// threadIdx.(y,x) -> (row-in-tile = k, col-in-tile = n).
-//
-// `batch_lo`/`batch_hi` select which batches contribute:
-//   * BATCHED : each block owns one batch (blockIdx.z), so [b, b+1).
-//   * SHARED  : a single (K,N) grad sums over ALL batches, so [0, Bsz) and
-//               blockIdx.z is unused (grid z == 1) — this preserves the
-//               batch-sum that makes the linear weight grad correct.
-// We stage A[b, m, k] and dC[b, m, n] tiles and contract over m.
+// OUT=(K,N), contract M (and, for SHARED B, sum over the batch too).
+// LHS must be indexed [row=k][c=m] = A[b, m, k] (A stored A[m*K + k], so a
+// transposed load); RHS = dC[b] indexed [c=m][col=n] = dC[m*N + n] (plain row-
+// major). For BATCHED B each block owns one batch (blockIdx.z); for SHARED B a
+// single (K,N) grad sums over ALL batches, so we loop b in [0,Bsz) with grid
+// z==1 — preserving the batch sum that makes the linear weight grad correct.
 // ---------------------------------------------------------------------------
+__device__ __forceinline__ void tile_engine_dB_onebatch(
+        const float* __restrict__ A, int64_t a_base,     // A[b], A[m,k]=base+m*K+k
+        const float* __restrict__ dC, int64_t dc_base,   // dC[b], dC[m,n]=base+m*N+n
+        int64_t M, int64_t K, int64_t N,
+        int64_t block_row_base, int64_t block_col_base,  // k base, n base
+        float acc[TM][TN]) {
+    __shared__ float As[BK][BM];   // [m within step][k within tile]
+    __shared__ float dCs[BK][BN];  // [m within step][n within tile]
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int thread_row0 = threadIdx.y * TM;   // k offset in tile
+    const int thread_col0 = threadIdx.x * TN;   // n offset in tile
+
+    int64_t m_steps = (M + BK - 1) / BK;         // contract over M
+    for (int64_t t = 0; t < m_steps; ++t) {
+        int64_t c_base = t * BK;                 // m offset for this step
+
+        // As[m][k] = A[b, m, k] = A[a_base + m*K + k]   (transposed load)
+        for (int i = tid; i < BK * BM; i += BLOCK_THREADS) {
+            int c = i / BM;            // m within step
+            int r = i % BM;            // k within tile
+            int64_t gm = c_base + c;
+            int64_t gk = block_row_base + r;
+            As[c][r] = (gm < M && gk < K) ? A[a_base + gm * K + gk] : 0.0f;
+        }
+        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]
+        for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
+            int c = i / BN;            // m within step
+            int n = i % BN;            // n within tile
+            int64_t gm = c_base + c;
+            int64_t gn = block_col_base + n;
+            dCs[c][n] = (gm < M && gn < N) ? dC[dc_base + gm * N + gn] : 0.0f;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int cc = 0; cc < BK; ++cc) {     // cc indexes m within the step
+            float a_reg[TM];   // A slice over k
+            float b_reg[TN];   // dC slice over n
+            #pragma unroll
+            for (int i = 0; i < TM; ++i) a_reg[i] = As[cc][thread_row0 + i];
+            #pragma unroll
+            for (int j = 0; j < TN; ++j) b_reg[j] = dCs[cc][thread_col0 + j];
+            #pragma unroll
+            for (int i = 0; i < TM; ++i)
+                #pragma unroll
+                for (int j = 0; j < TN; ++j)
+                    acc[i][j] += a_reg[i] * b_reg[j];
+        }
+
+        __syncthreads();
+    }
+}
+
 __global__ void matmul_backward_dB_kernel(const float* __restrict__ A,
                                          float* __restrict__ dB,
                                          const float* __restrict__ dC,
                                          int64_t Bsz, int64_t M, int64_t K,
                                          int64_t N, int shared) {
-    int64_t row = (int64_t)blockIdx.y * TILE + threadIdx.y;  // k
-    int64_t col = (int64_t)blockIdx.x * TILE + threadIdx.x;  // n
+    int64_t block_row_base = (int64_t)blockIdx.y * BM;   // k base
+    int64_t block_col_base = (int64_t)blockIdx.x * BN;   // n base
 
     int64_t batch_lo, batch_hi;
     if (shared) { batch_lo = 0; batch_hi = Bsz; }        // sum over ALL batches
     else        { batch_lo = blockIdx.z; batch_hi = blockIdx.z + 1; }
 
-    __shared__ float As[TILE][TILE];   // staged A[b, m-chunk, k=row]
-    __shared__ float dCs[TILE][TILE];  // staged dC[b, m-chunk, n=col]
+    float acc[TM][TN];
+    #pragma unroll
+    for (int i = 0; i < TM; ++i)
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
 
-    float acc = 0.0f;
-    int64_t m_chunks = (M + TILE - 1) / TILE;            // M-tiles per batch
+    // Loop over the contributing batches, accumulating into the SAME registers
+    // (this is the batch sum for SHARED B; a single iteration for BATCHED B).
     for (int64_t b = batch_lo; b < batch_hi; ++b) {
-        const float* Abatch = A + b * M * K;             // A[b,:,:]
-        const float* dCbatch = dC + b * M * N;           // dC[b,:,:]
-        for (int64_t t = 0; t < m_chunks; ++t) {
-            int64_t m_a = t * TILE + threadIdx.y;        // m for A's load
-            int64_t m_dc = t * TILE + threadIdx.y;       // m for dC's load
-
-            // As[m-in-tile][k-in-tile] = A[b, m, k=col-of-block].  This thread's
-            // k is blockIdx.y*TILE+threadIdx.x for the staged A tile.
-            int64_t k_a = (int64_t)blockIdx.y * TILE + threadIdx.x;
-            As[threadIdx.y][threadIdx.x] =
-                (m_a < M && k_a < K) ? Abatch[m_a * K + k_a] : 0.0f;
-            // dCs[m-in-tile][n-in-tile] = dC[b, m, n=col]
-            dCs[threadIdx.y][threadIdx.x] =
-                (m_dc < M && col < N) ? dCbatch[m_dc * N + col] : 0.0f;
-
-            __syncthreads();
-
-            // acc += Σ_m A[b,m,row=k] · dC[b,m,col=n].  As is indexed [m][k],
-            // dCs is indexed [m][n]; this thread's k is threadIdx.y, n threadIdx.x.
-            #pragma unroll
-            for (int mm = 0; mm < TILE; ++mm) {
-                acc += As[mm][threadIdx.y] * dCs[mm][threadIdx.x];
-            }
-
-            __syncthreads();
-        }
+        int64_t a_base = b * M * K;
+        int64_t dc_base = b * M * N;
+        tile_engine_dB_onebatch(A, a_base, dC, dc_base, M, K, N,
+                                block_row_base, block_col_base, acc);
     }
 
-    if (row < K && col < N) {
-        // BATCHED writes the per-batch slice; SHARED writes the single (K,N).
-        int64_t out_off = shared ? (row * N + col)
-                                 : ((blockIdx.z * K + row) * N + col);
-        dB[out_off] += acc;                              // ACCUMULATE
+    int thread_row0 = threadIdx.y * TM;   // k
+    int thread_col0 = threadIdx.x * TN;   // n
+    #pragma unroll
+    for (int i = 0; i < TM; ++i) {
+        int64_t k = block_row_base + thread_row0 + i;
+        if (k >= K) continue;
+        #pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            int64_t n = block_col_base + thread_col0 + j;
+            if (n >= N) continue;
+            // BATCHED writes the per-batch slice; SHARED writes the single (K,N).
+            int64_t out_off = shared ? (k * N + n)
+                                     : ((blockIdx.z * K + k) * N + n);
+            dB[out_off] += acc[i][j];                    // ACCUMULATE
+        }
     }
 }
 
@@ -230,18 +432,19 @@ inline Dims derive_dims(const torch::Tensor& a, const torch::Tensor& b) {
     return {Bsz, M, K, N, shared};
 }
 
-// Grid helper: ceil-div an output extent into TILE-wide blocks.
-inline unsigned int grid_dim(int64_t extent) {
-    return (unsigned int)((extent + TILE - 1) / TILE);
+// Grid helper: ceil-div an output extent into block-tile-wide blocks. `tile` is
+// the block-tile extent along that axis (BM for rows, BN for cols).
+inline unsigned int grid_dim(int64_t extent, int tile) {
+    return (unsigned int)((extent + tile - 1) / tile);
 }
 
 } // namespace
 
 void matmul_forward(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
     Dims d = derive_dims(a, b);
-    dim3 block(TILE, TILE);
-    // x -> N tiles, y -> M tiles, z -> batch.
-    dim3 grid(grid_dim(d.N), grid_dim(d.M), (unsigned int)d.Bsz);
+    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+    // x -> N block-tiles, y -> M block-tiles, z -> batch.
+    dim3 grid(grid_dim(d.N, BN), grid_dim(d.M, BM), (unsigned int)d.Bsz);
     matmul_forward_kernel<<<grid, block>>>(
         a.data_ptr<float>(), b.data_ptr<float>(), out.data_ptr<float>(),
         d.Bsz, d.M, d.K, d.N, d.shared);
@@ -250,9 +453,9 @@ void matmul_forward(torch::Tensor a, torch::Tensor b, torch::Tensor out) {
 // dA: A's shape comes from dA; B's layout (batched/shared) comes from b.
 void matmul_backward_dA(torch::Tensor b, torch::Tensor dA, torch::Tensor dC) {
     Dims d = derive_dims(dA, b);
-    dim3 block(TILE, TILE);
-    // Output is (M,K): x -> K tiles, y -> M tiles, z -> batch.
-    dim3 grid(grid_dim(d.K), grid_dim(d.M), (unsigned int)d.Bsz);
+    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+    // Output is (M,K): x -> K block-tiles, y -> M block-tiles, z -> batch.
+    dim3 grid(grid_dim(d.K, BN), grid_dim(d.M, BM), (unsigned int)d.Bsz);
     matmul_backward_dA_kernel<<<grid, block>>>(
         b.data_ptr<float>(), dA.data_ptr<float>(), dC.data_ptr<float>(),
         d.Bsz, d.M, d.K, d.N, d.shared);
@@ -262,11 +465,11 @@ void matmul_backward_dA(torch::Tensor b, torch::Tensor dA, torch::Tensor dC) {
 // (dB.dim() == a.dim() -> batched, else shared).
 void matmul_backward_dB(torch::Tensor a, torch::Tensor dB, torch::Tensor dC) {
     Dims d = derive_dims(a, dB);
-    dim3 block(TILE, TILE);
-    // Output is (K,N): x -> N tiles, y -> K tiles. z spans the batch for the
-    // BATCHED case; for SHARED the kernel sums batches internally so z == 1.
+    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+    // Output is (K,N): x -> N block-tiles, y -> K block-tiles. z spans the batch
+    // for the BATCHED case; for SHARED the kernel sums batches internally so z==1.
     unsigned int gz = d.shared ? 1u : (unsigned int)d.Bsz;
-    dim3 grid(grid_dim(d.N), grid_dim(d.K), gz);
+    dim3 grid(grid_dim(d.N, BN), grid_dim(d.K, BM), gz);
     matmul_backward_dB_kernel<<<grid, block>>>(
         a.data_ptr<float>(), dB.data_ptr<float>(), dC.data_ptr<float>(),
         d.Bsz, d.M, d.K, d.N, d.shared);
