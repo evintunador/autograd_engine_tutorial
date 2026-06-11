@@ -1,12 +1,12 @@
 # autograd_engine_tutorial
-the plan for this repo is to create tutorials on autograd engines for three levels of difficulty:
+the plan for this repo is to create tutorials on autograd engines for four levels of difficulty:
 
 |                   |                                                                                                                                                                    | micrograd            | minigrad             | autograd<br>(Triton) | autograd<br>(CUDA)     |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- | -------------------- | ----------------- | ---------------------- |
 |                   | difficulty level                                                                                                                                                   | beginner             | intermediate         | advanced          | advanced               |
 |                   | time commitment                                                                                                                                                    | medium               | small                | large             | large                  |
-|                   | status                                                                                                                                                             | minimally-functional | minimally-functional | WIP               | might not even make it |
-|                   | attempts to (mostly) resemble [PyTorch](https://pytorch.org) syntax                                                                                                | ❌                    | ✅                    | ✅                 | TBD                    |
+|                   | status                                                                                                                                                             | minimally-functional | minimally-functional | minimally-functional | minimally-functional |
+|                   | attempts to (mostly) resemble [PyTorch](https://pytorch.org) syntax                                                                                                | ❌                    | ✅                    | ✅                 | ✅                     |
 |                   |                                                                                                                                                                    |                      |                      |                   |                        |
 | prerequisites     | basic python                                                                                                                                                       | ✅                    | ✅                    | ✅                 | ❌                      |
 |                   | basic C                                                                                                                                                            | ❌                    | ❌                    | ❌                 | ✅                      |
@@ -23,7 +23,7 @@ the plan for this repo is to create tutorials on autograd engines for three leve
 |                   | Nvidia's [CUDA](https://developer.nvidia.com/cuda-downloads?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=24.04&target_type=deb_local)     | ❌                    | ❌                    | ❌                 | ✅                      |
 
 ## testing
-all three implementations are checked against [PyTorch](https://pytorch.org) (forward & backward, ops & nn modules) by a single unified suite in [`tests/`](tests/). run `pytest tests/` from the repo root; backends needing hardware you don't have (e.g. `tritongrad` wants a CUDA GPU) are skipped rather than failed. adding a new implementation (`cutilegrad`, `cudagrad`, …) just means writing one adapter file — see [`tests/README.md`](tests/README.md).
+all four implementations are checked against [PyTorch](https://pytorch.org) (forward & backward, ops & nn modules) by a single unified suite in [`tests/`](tests/). run `pytest tests/` from the repo root; backends needing hardware you don't have (e.g. `tritongrad` and `cudagrad` want a CUDA GPU) are skipped rather than failed. adding a new implementation just means writing one adapter file — see [`tests/README.md`](tests/README.md).
 
 ## micrograd
 the purpose of this lesson is for absolute beginners with a programming (as opposed to math) background to learn about the math and implementation of GPTs all the way from the barebones autograd engine and up to the GPT operations itself. the basic building block of micrograd is the `Value` object, each of which is just a single floating point number for the data and another single floating point number to keep track of the data's gradient. the first half or so of this lesson is roughly equivalent to [karpathy's `micrograd`](https://youtu.be/VMj-3S1tku0?si=FM0qtfV-cvXr2kDJ) while the second half is an extension to implement a full GPT
@@ -84,7 +84,7 @@ Personally I'm on a Mac so i plan on doing all my work on a cloud provider like 
 - [ ] train.py
 
 ## autograd (CUDA)
-I'll consider building this if 1) the other three perform well 2) people are interested and 3) i become a masochist
+the lowest tier. where the Triton lesson writes the forward/backward math as tile-level Triton kernels, [`cudagrad/`](cudagrad/) writes it one step lower as **raw CUDA C++ kernels** (JIT-compiled via `torch.utils.cpp_extension.load`), so you can see exactly what the GPU hardware is doing. same educational goal as every tier: just enough of an autograd engine to build a GPT. it mirrors `tritongrad/` op-for-op — `CudaTensor` wraps a `torch.float32` CUDA tensor for memory but runs every operation's math in our own `.cu` kernels. complete and GPU-verified: all 16 ops and 4 modules pass the repo-wide suite against PyTorch (`pytest tests/ -k cudagrad` → 20/20), with `model.py`/`train.py`/`benchmarking.py` mirroring the Triton tier. requires an NVIDIA GPU + CUDA toolkit (`nvcc`); see [`cudagrad/README.md`](cudagrad/README.md) for details.
 
 ## autograd (MPS)
 I'll consider building this if 1) the other three perform well 2) people are interested and 3) i become a masochist
