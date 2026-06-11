@@ -1,20 +1,25 @@
 // Matmul Metal kernels for mlxgrad: forward + backward (dA, dB).
 //
-// The mlxgrad analog of cudagrad/kernels/matmul.cu. TILED shared-memory GEMM:
-// each threadgroup is TILE x TILE threads computing one TILE x TILE output tile
-// for one batch (grid.z = Bsz). We stage TILE x TILE sub-tiles of the two
-// operands into threadgroup memory, barrier, accumulate over the staged tile,
-// and march along the contracted dim in steps of TILE. Each thread owns a
-// distinct output element, so forward writes and the backward functional
-// accumulation (out = grad_in + contribution) need NO atomics.
+// Round-2 GEMM built on Metal's simdgroup_matrix MMA intrinsics (the 8x8
+// matrix-multiply-accumulate ops MLX uses internally; Apple-silicon's tensor
+// cores). Each threadgroup computes a BM x BN output tile for one batch using a
+// 2-D grid of simdgroups (SGM x SGN). Every simdgroup owns a register block of
+// WM x WN simdgroup_float8x8 accumulator fragments, so it produces a
+// (WM*8) x (WN*8) sub-tile. With BM=BN=64, BK=8, SGM=2, SGN=4, WM=4, WN=2 the
+// threadgroup is 8 simdgroups = 256 threads.
 //
-// EDGE HANDLING: the grid is rounded UP to a multiple of TILE in each output
-// dim (see the Python wrappers), so threadgroups are always FULL (MLX uses
-// non-uniform dispatch, which would otherwise hand boundary threadgroups a
-// partial thread block and break the cooperative loads). Threads whose output
-// coords fall outside [M)/[N)/[K) load 0 into the staging tiles and skip the
-// final store. This makes the kernels correct for ARBITRARY M/K/N, not just
-// multiples of TILE.
+// Per K-step we stage BM x BK of the left operand and BK x BN of the right
+// operand into threadgroup memory (cooperatively, all threads), barrier, then
+// each simdgroup simdgroup_load's its fragments out of the staged tiles and
+// accumulates with simdgroup_multiply_accumulate. At the end each simdgroup
+// simdgroup_store's its fragments to a shared Cs tile which is written out (with
+// edge guards) to global memory. Accumulating in fragment registers keeps the
+// staged tiles small and the FLOP:byte ratio high.
+//
+// EDGE HANDLING: the grid is rounded UP so every threadgroup is full (MLX uses
+// non-uniform dispatch). Cooperative loads zero-fill out-of-range elements and
+// the final store guards output coords, so the kernels are correct for
+// ARBITRARY M/K/N (incl. dims smaller than 8, e.g. the (2,8,16)@(2,16,8) tests).
 //
 // Layout/contract notes (all tensors contiguous, row-major, fp32):
 //   * A has shape (..., M, K); leading batch dims flatten to Bsz.
@@ -29,131 +34,275 @@
 //   * for the SHARED-B case the dB kernel sums over BOTH batch and M (that batch
 //     sum is exactly what makes the linear-layer weight grad correct).
 //
-// TILE must match TILE in mlx_kernels.py (the wrappers size the grid/threadgroup).
+// The tile constants below MUST match _BM/_BN/_BK and the launch math in
+// mlx_kernels.py (the wrappers size the grid/threadgroup from them).
 
 // @kernel matmul_forward
 // C[b,m,n] = Σ_k A[b,m,k]·B[(b),k,n]
-//   grid=(ceilN*TILE, ceilM*TILE, Bsz)  threadgroup=(TILE,TILE,1)  WRITES out
-#define TILE 16
+//   threadgroup = 256 threads (8 simdgroups); grid sized by the wrapper.  WRITES out
+#define BM 64u
+#define BN 64u
+#define BK 8u
+#define SGN 4u
+#define WM 4u
+#define WN 2u
 uint M_ = Mb[0]; uint K_ = Kb[0]; uint N_ = Nb[0]; uint SH = Sh[0];
-uint b   = thread_position_in_grid.z;
-uint lr  = thread_position_in_threadgroup.y;   // local row within tile
-uint lc  = thread_position_in_threadgroup.x;   // local col within tile
-uint m   = threadgroup_position_in_grid.y * TILE + lr;   // output row in [M)
-uint n   = threadgroup_position_in_grid.x * TILE + lc;   // output col in [N)
+uint b    = threadgroup_position_in_grid.z;
+uint tg_m = threadgroup_position_in_grid.y * BM;   // base output row (m)
+uint tg_n = threadgroup_position_in_grid.x * BN;   // base output col (n)
+uint sg   = simdgroup_index_in_threadgroup;
+uint sg_m = sg / SGN;                               // simdgroup row index
+uint sg_n = sg % SGN;                               // simdgroup col index
+uint tid  = thread_position_in_threadgroup.x;
+uint nthreads = threads_per_threadgroup.x;
 uint Abase = b * M_ * K_;
 uint Bbase = (SH != 0u) ? 0u : b * K_ * N_;
-threadgroup float As[TILE][TILE];
-threadgroup float Bs[TILE][TILE];
-float acc = 0.0f;
-uint nTiles = (K_ + TILE - 1) / TILE;
-for (uint t = 0; t < nTiles; ++t) {
-    uint kA = t * TILE + lc;     // column of A this thread stages
-    uint kB = t * TILE + lr;     // row of B this thread stages
-    As[lr][lc] = (m < M_ && kA < K_) ? A[Abase + m * K_ + kA] : 0.0f;
-    Bs[lr][lc] = (kB < K_ && n < N_) ? B[Bbase + kB * N_ + n] : 0.0f;
+threadgroup float As[BM][BK];   // A sub-tile  (rows m, cols k)
+threadgroup float Bs[BK][BN];   // B sub-tile  (rows k, cols n)
+simdgroup_float8x8 Cfrag[WM][WN];
+for (uint i = 0; i < WM; ++i) for (uint j = 0; j < WN; ++j) Cfrag[i][j] = simdgroup_float8x8(0.0f);
+uint nK = (K_ + BK - 1) / BK;
+for (uint kt = 0; kt < nK; ++kt) {
+    uint k0 = kt * BK;
+    for (uint idx = tid; idx < BM * BK; idx += nthreads) {
+        uint r = idx / BK, c = idx % BK;            // r in [0,BM) m, c in [0,BK) k
+        uint gm = tg_m + r, gk = k0 + c;
+        As[r][c] = (gm < M_ && gk < K_) ? A[Abase + gm * K_ + gk] : 0.0f;
+    }
+    for (uint idx = tid; idx < BK * BN; idx += nthreads) {
+        uint r = idx / BN, c = idx % BN;            // r in [0,BK) k, c in [0,BN) n
+        uint gk = k0 + r, gn = tg_n + c;
+        Bs[r][c] = (gk < K_ && gn < N_) ? B[Bbase + gk * N_ + gn] : 0.0f;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint p = 0; p < TILE; ++p) acc += As[lr][p] * Bs[p][lc];
+    simdgroup_float8x8 Af[WM], Bf[WN];
+    for (uint i = 0; i < WM; ++i) simdgroup_load(Af[i], &As[(sg_m * WM + i) * 8u][0],            BK);
+    for (uint j = 0; j < WN; ++j) simdgroup_load(Bf[j], &Bs[0][(sg_n * WN + j) * 8u],            BN);
+    for (uint i = 0; i < WM; ++i)
+        for (uint j = 0; j < WN; ++j)
+            simdgroup_multiply_accumulate(Cfrag[i][j], Af[i], Bf[j], Cfrag[i][j]);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
-if (m < M_ && n < N_) out[(b * M_ + m) * N_ + n] = acc;
-#undef TILE
+threadgroup float Cs[BM][BN];
+for (uint i = 0; i < WM; ++i)
+    for (uint j = 0; j < WN; ++j)
+        simdgroup_store(Cfrag[i][j], &Cs[(sg_m * WM + i) * 8u][(sg_n * WN + j) * 8u], BN);
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint idx = tid; idx < BM * BN; idx += nthreads) {
+    uint r = idx / BN, c = idx % BN;
+    uint gm = tg_m + r, gn = tg_n + c;
+    if (gm < M_ && gn < N_) out[(b * M_ + gm) * N_ + gn] = Cs[r][c];
+}
+#undef BM
+#undef BN
+#undef BK
+#undef SGN
+#undef WM
+#undef WN
 
 // @kernel matmul_backward_dA
-// dA[b,m,k] = grad_in[...] + Σ_n dC[b,m,n]·B[(b),k,n]
-//   This is dC @ B^T : contract over n. Output is (M x K) per batch.
-//   grid=(ceilK*TILE, ceilM*TILE, Bsz)  threadgroup=(TILE,TILE,1)
-#define TILE 16
+// dA[b,m,k] = grad_in[...] + Σ_n dC[b,m,n]·B[(b),k,n]    (= dC @ B^T, contract n)
+//   Output is (M x K) per batch.  i=m (BM rows), j=k (BN cols), contract p=n.
+//   Left  operand L[m,n] = dC[m,n]                 -> staged into As[m][n]
+//   Right operand R[n,k] = B[k,n]  (B transposed)  -> staged into Bs[n][k]
+//   FUNCTIONAL accumulate: out = grad_in + contribution.
+#define BM 64u
+#define BN 64u
+#define BK 8u
+#define SGN 4u
+#define WM 4u
+#define WN 2u
 uint M_ = Mb[0]; uint K_ = Kb[0]; uint N_ = Nb[0]; uint SH = Sh[0];
-uint b   = thread_position_in_grid.z;
-uint lr  = thread_position_in_threadgroup.y;
-uint lc  = thread_position_in_threadgroup.x;
-uint m   = threadgroup_position_in_grid.y * TILE + lr;   // output row in [M)
-uint k   = threadgroup_position_in_grid.x * TILE + lc;   // output col in [K)
+uint b    = threadgroup_position_in_grid.z;
+uint tg_m = threadgroup_position_in_grid.y * BM;   // base output row (m)
+uint tg_k = threadgroup_position_in_grid.x * BN;   // base output col (k)
+uint sg   = simdgroup_index_in_threadgroup;
+uint sg_m = sg / SGN;
+uint sg_n = sg % SGN;
+uint tid  = thread_position_in_threadgroup.x;
+uint nthreads = threads_per_threadgroup.x;
 uint dCbase = b * M_ * N_;
 uint Bbase  = (SH != 0u) ? 0u : b * K_ * N_;
-threadgroup float dCs[TILE][TILE];   // dC tile: rows = m, cols = n
-threadgroup float Bs[TILE][TILE];    // B^T tile: rows = n, cols = k  (B[k,n])
-float acc = 0.0f;
-uint nTiles = (N_ + TILE - 1) / TILE;
-for (uint t = 0; t < nTiles; ++t) {
-    uint nC = t * TILE + lc;     // dC column this thread stages
-    uint nB = t * TILE + lr;     // B column (the contracted n) this thread stages
-    dCs[lr][lc] = (m < M_ && nC < N_) ? dC[dCbase + m * N_ + nC] : 0.0f;
-    // Bs[lr][lc] holds B[k=col, n=row] so the inner product contracts over n.
-    Bs[lr][lc] = (k < K_ && nB < N_) ? B[Bbase + k * N_ + nB] : 0.0f;
+threadgroup float As[BM][BK];   // dC sub-tile : rows m, cols n  (contract = n)
+threadgroup float Bs[BK][BN];   // B^T sub-tile: rows n, cols k
+simdgroup_float8x8 Cfrag[WM][WN];
+for (uint i = 0; i < WM; ++i) for (uint j = 0; j < WN; ++j) Cfrag[i][j] = simdgroup_float8x8(0.0f);
+uint nP = (N_ + BK - 1) / BK;                       // contract over n in steps of BK
+for (uint pt = 0; pt < nP; ++pt) {
+    uint p0 = pt * BK;
+    for (uint idx = tid; idx < BM * BK; idx += nthreads) {
+        uint r = idx / BK, c = idx % BK;            // r m, c n-within-step
+        uint gm = tg_m + r, gn = p0 + c;
+        As[r][c] = (gm < M_ && gn < N_) ? dC[dCbase + gm * N_ + gn] : 0.0f;
+    }
+    for (uint idx = tid; idx < BK * BN; idx += nthreads) {
+        uint r = idx / BN, c = idx % BN;            // r n-within-step, c k
+        uint gn = p0 + r, gk = tg_k + c;
+        Bs[r][c] = (gn < N_ && gk < K_) ? B[Bbase + gk * N_ + gn] : 0.0f;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint p = 0; p < TILE; ++p) acc += dCs[lr][p] * Bs[p][lc];
+    simdgroup_float8x8 Af[WM], Bf[WN];
+    for (uint i = 0; i < WM; ++i) simdgroup_load(Af[i], &As[(sg_m * WM + i) * 8u][0], BK);
+    for (uint j = 0; j < WN; ++j) simdgroup_load(Bf[j], &Bs[0][(sg_n * WN + j) * 8u], BN);
+    for (uint i = 0; i < WM; ++i)
+        for (uint j = 0; j < WN; ++j)
+            simdgroup_multiply_accumulate(Cfrag[i][j], Af[i], Bf[j], Cfrag[i][j]);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
-if (m < M_ && k < K_) {
-    uint o = (b * M_ + m) * K_ + k;
-    out[o] = grad_in[o] + acc;
+threadgroup float Cs[BM][BN];
+for (uint i = 0; i < WM; ++i)
+    for (uint j = 0; j < WN; ++j)
+        simdgroup_store(Cfrag[i][j], &Cs[(sg_m * WM + i) * 8u][(sg_n * WN + j) * 8u], BN);
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint idx = tid; idx < BM * BN; idx += nthreads) {
+    uint r = idx / BN, c = idx % BN;
+    uint gm = tg_m + r, gk = tg_k + c;
+    if (gm < M_ && gk < K_) {
+        uint o = (b * M_ + gm) * K_ + gk;
+        out[o] = grad_in[o] + Cs[r][c];
+    }
 }
-#undef TILE
+#undef BM
+#undef BN
+#undef BK
+#undef SGN
+#undef WM
+#undef WN
 
 // @kernel matmul_backward_dB_batched
-// dB[b,k,n] = grad_in[...] + Σ_m A[b,m,k]·dC[b,m,n]
-//   This is A^T @ dC : contract over m. Output is (K x N) per batch.
-//   grid=(ceilN*TILE, ceilK*TILE, Bsz)  threadgroup=(TILE,TILE,1)
-#define TILE 16
+// dB[b,k,n] = grad_in[...] + Σ_m A[b,m,k]·dC[b,m,n]    (= A^T @ dC, contract m)
+//   Output is (K x N) per batch.  i=k (BM rows), j=n (BN cols), contract p=m.
+//   Left  operand L[k,m] = A[m,k]  (A transposed)  -> staged into As[k][m]
+//   Right operand R[m,n] = dC[m,n]                 -> staged into Bs[m][n]
+//   FUNCTIONAL accumulate: out = grad_in + contribution.
+#define BM 64u
+#define BN 64u
+#define BK 8u
+#define SGN 4u
+#define WM 4u
+#define WN 2u
 uint M_ = Mb[0]; uint K_ = Kb[0]; uint N_ = Nb[0];
-uint b   = thread_position_in_grid.z;
-uint lr  = thread_position_in_threadgroup.y;
-uint lc  = thread_position_in_threadgroup.x;
-uint k   = threadgroup_position_in_grid.y * TILE + lr;   // output row in [K)
-uint n   = threadgroup_position_in_grid.x * TILE + lc;   // output col in [N)
+uint b    = threadgroup_position_in_grid.z;
+uint tg_k = threadgroup_position_in_grid.y * BM;   // base output row (k)
+uint tg_n = threadgroup_position_in_grid.x * BN;   // base output col (n)
+uint sg   = simdgroup_index_in_threadgroup;
+uint sg_m = sg / SGN;
+uint sg_n = sg % SGN;
+uint tid  = thread_position_in_threadgroup.x;
+uint nthreads = threads_per_threadgroup.x;
 uint Abase  = b * M_ * K_;
 uint dCbase = b * M_ * N_;
-threadgroup float As[TILE][TILE];    // A^T tile: rows = k, cols = m  (A[m,k])
-threadgroup float dCs[TILE][TILE];   // dC tile: rows = m, cols = n
-float acc = 0.0f;
-uint nTiles = (M_ + TILE - 1) / TILE;
-for (uint t = 0; t < nTiles; ++t) {
-    uint mA = t * TILE + lc;     // A row (contracted m) this thread stages
-    uint mC = t * TILE + lr;     // dC row (contracted m) this thread stages
-    // As[lr][lc] holds A[m=col, k=row] so the inner product contracts over m.
-    As[lr][lc]  = (k < K_ && mA < M_) ? A[Abase + mA * K_ + k] : 0.0f;
-    dCs[lr][lc] = (mC < M_ && n < N_) ? dC[dCbase + mC * N_ + n] : 0.0f;
+threadgroup float As[BM][BK];   // A^T sub-tile: rows k, cols m  (contract = m)
+threadgroup float Bs[BK][BN];   // dC  sub-tile: rows m, cols n
+simdgroup_float8x8 Cfrag[WM][WN];
+for (uint i = 0; i < WM; ++i) for (uint j = 0; j < WN; ++j) Cfrag[i][j] = simdgroup_float8x8(0.0f);
+uint nP = (M_ + BK - 1) / BK;                       // contract over m in steps of BK
+for (uint pt = 0; pt < nP; ++pt) {
+    uint p0 = pt * BK;
+    for (uint idx = tid; idx < BM * BK; idx += nthreads) {
+        uint r = idx / BK, c = idx % BK;            // r k, c m-within-step
+        uint gk = tg_k + r, gm = p0 + c;
+        As[r][c] = (gk < K_ && gm < M_) ? A[Abase + gm * K_ + gk] : 0.0f;
+    }
+    for (uint idx = tid; idx < BK * BN; idx += nthreads) {
+        uint r = idx / BN, c = idx % BN;            // r m-within-step, c n
+        uint gm = p0 + r, gn = tg_n + c;
+        Bs[r][c] = (gm < M_ && gn < N_) ? dC[dCbase + gm * N_ + gn] : 0.0f;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint p = 0; p < TILE; ++p) acc += As[lr][p] * dCs[p][lc];
+    simdgroup_float8x8 Af[WM], Bf[WN];
+    for (uint i = 0; i < WM; ++i) simdgroup_load(Af[i], &As[(sg_m * WM + i) * 8u][0], BK);
+    for (uint j = 0; j < WN; ++j) simdgroup_load(Bf[j], &Bs[0][(sg_n * WN + j) * 8u], BN);
+    for (uint i = 0; i < WM; ++i)
+        for (uint j = 0; j < WN; ++j)
+            simdgroup_multiply_accumulate(Cfrag[i][j], Af[i], Bf[j], Cfrag[i][j]);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
-if (k < K_ && n < N_) {
-    uint o = (b * K_ + k) * N_ + n;
-    out[o] = grad_in[o] + acc;
+threadgroup float Cs[BM][BN];
+for (uint i = 0; i < WM; ++i)
+    for (uint j = 0; j < WN; ++j)
+        simdgroup_store(Cfrag[i][j], &Cs[(sg_m * WM + i) * 8u][(sg_n * WN + j) * 8u], BN);
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint idx = tid; idx < BM * BN; idx += nthreads) {
+    uint r = idx / BN, c = idx % BN;
+    uint gk = tg_k + r, gn = tg_n + c;
+    if (gk < K_ && gn < N_) {
+        uint o = (b * K_ + gk) * N_ + gn;
+        out[o] = grad_in[o] + Cs[r][c];
+    }
 }
-#undef TILE
+#undef BM
+#undef BN
+#undef BK
+#undef SGN
+#undef WM
+#undef WN
 
 // @kernel matmul_backward_dB_shared
 // dB[k,n] = grad_in[...] + Σ_b Σ_m A[b,m,k]·dC[b,m,n]   (sums over batch AND m)
 //   A^T @ dC contracted over m, then summed across the batch. Output (K x N).
-//   grid=(ceilN*TILE, ceilK*TILE, 1)  threadgroup=(TILE,TILE,1)
-#define TILE 16
+//   i=k (BM rows), j=n (BN cols), contract p=m, outer loop over batch.
+//   FUNCTIONAL accumulate: out = grad_in + contribution.
+#define BM 64u
+#define BN 64u
+#define BK 8u
+#define SGN 4u
+#define WM 4u
+#define WN 2u
 uint M_ = Mb[0]; uint K_ = Kb[0]; uint N_ = Nb[0]; uint BS = Bsz[0];
-uint lr  = thread_position_in_threadgroup.y;
-uint lc  = thread_position_in_threadgroup.x;
-uint k   = threadgroup_position_in_grid.y * TILE + lr;   // output row in [K)
-uint n   = threadgroup_position_in_grid.x * TILE + lc;   // output col in [N)
-threadgroup float As[TILE][TILE];    // A^T tile: rows = k, cols = m
-threadgroup float dCs[TILE][TILE];   // dC tile: rows = m, cols = n
-float acc = 0.0f;
-uint mTiles = (M_ + TILE - 1) / TILE;
+uint tg_k = threadgroup_position_in_grid.y * BM;   // base output row (k)
+uint tg_n = threadgroup_position_in_grid.x * BN;   // base output col (n)
+uint sg   = simdgroup_index_in_threadgroup;
+uint sg_m = sg / SGN;
+uint sg_n = sg % SGN;
+uint tid  = thread_position_in_threadgroup.x;
+uint nthreads = threads_per_threadgroup.x;
+threadgroup float As[BM][BK];   // A^T sub-tile: rows k, cols m
+threadgroup float Bs[BK][BN];   // dC  sub-tile: rows m, cols n
+simdgroup_float8x8 Cfrag[WM][WN];
+for (uint i = 0; i < WM; ++i) for (uint j = 0; j < WN; ++j) Cfrag[i][j] = simdgroup_float8x8(0.0f);
+uint nP = (M_ + BK - 1) / BK;
 for (uint b = 0; b < BS; ++b) {
     uint Abase  = b * M_ * K_;
     uint dCbase = b * M_ * N_;
-    for (uint t = 0; t < mTiles; ++t) {
-        uint mA = t * TILE + lc;
-        uint mC = t * TILE + lr;
-        As[lr][lc]  = (k < K_ && mA < M_) ? A[Abase + mA * K_ + k] : 0.0f;
-        dCs[lr][lc] = (mC < M_ && n < N_) ? dC[dCbase + mC * N_ + n] : 0.0f;
+    for (uint pt = 0; pt < nP; ++pt) {
+        uint p0 = pt * BK;
+        for (uint idx = tid; idx < BM * BK; idx += nthreads) {
+            uint r = idx / BK, c = idx % BK;        // r k, c m-within-step
+            uint gk = tg_k + r, gm = p0 + c;
+            As[r][c] = (gk < K_ && gm < M_) ? A[Abase + gm * K_ + gk] : 0.0f;
+        }
+        for (uint idx = tid; idx < BK * BN; idx += nthreads) {
+            uint r = idx / BN, c = idx % BN;        // r m-within-step, c n
+            uint gm = p0 + r, gn = tg_n + c;
+            Bs[r][c] = (gm < M_ && gn < N_) ? dC[dCbase + gm * N_ + gn] : 0.0f;
+        }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint p = 0; p < TILE; ++p) acc += As[lr][p] * dCs[p][lc];
+        simdgroup_float8x8 Af[WM], Bf[WN];
+        for (uint i = 0; i < WM; ++i) simdgroup_load(Af[i], &As[(sg_m * WM + i) * 8u][0], BK);
+        for (uint j = 0; j < WN; ++j) simdgroup_load(Bf[j], &Bs[0][(sg_n * WN + j) * 8u], BN);
+        for (uint i = 0; i < WM; ++i)
+            for (uint j = 0; j < WN; ++j)
+                simdgroup_multiply_accumulate(Cfrag[i][j], Af[i], Bf[j], Cfrag[i][j]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
-if (k < K_ && n < N_) {
-    uint o = k * N_ + n;
-    out[o] = grad_in[o] + acc;
+threadgroup float Cs[BM][BN];
+for (uint i = 0; i < WM; ++i)
+    for (uint j = 0; j < WN; ++j)
+        simdgroup_store(Cfrag[i][j], &Cs[(sg_m * WM + i) * 8u][(sg_n * WN + j) * 8u], BN);
+threadgroup_barrier(mem_flags::mem_threadgroup);
+for (uint idx = tid; idx < BM * BN; idx += nthreads) {
+    uint r = idx / BN, c = idx % BN;
+    uint gk = tg_k + r, gn = tg_n + c;
+    if (gk < K_ && gn < N_) {
+        uint o = gk * N_ + gn;
+        out[o] = grad_in[o] + Cs[r][c];
+    }
 }
-#undef TILE
+#undef BM
+#undef BN
+#undef BK
+#undef SGN
+#undef WM
+#undef WN

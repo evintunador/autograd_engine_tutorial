@@ -59,7 +59,7 @@ def _sources(group):
     return _SRC_CACHE[group]
 
 
-def _kernel(group, name, input_names, output_names):
+def _kernel(group, name, input_names, output_names, header=""):
     key = (group, name)
     if key not in _KERNEL_CACHE:
         src = _sources(group)[name]
@@ -68,6 +68,7 @@ def _kernel(group, name, input_names, output_names):
             input_names=input_names,
             output_names=output_names,
             source=src,
+            header=header,
         )
     return _KERNEL_CACHE[key]
 
@@ -165,31 +166,38 @@ def _mm_dims(a_like, b_like):
     return Bsz, M, K, N, shared
 
 
-# Tiled GEMM: TILE x TILE threadgroups, each computes a TILE x TILE output tile
-# for one batch (grid.z = Bsz). Must equal TILE in kernels/matmul.metal.
-_TILE = 16
+# simdgroup_matrix (MMA) GEMM: each threadgroup computes a _BM x _BN output tile
+# for one batch using a _SGM x _SGN grid of simdgroups (8 simdgroups = _NTHREADS
+# threads), each accumulating _WM x _WN simdgroup_float8x8 fragments. These MUST
+# match the tile #defines at the top of each kernel in kernels/matmul.metal.
+_BM, _BN, _BK = 64, 64, 8
+_NTHREADS = 256          # 8 simdgroups (SGM=2 x SGN=4), 32 lanes each
+
+# simdgroup_matrix intrinsics live in these headers; prepend them to each body.
+_MM_HEADER = "#include <metal_simdgroup>\n#include <metal_simdgroup_matrix>\n"
 
 
 def _mm_grid(out_cols, out_rows, batch):
-    """(grid, threadgroup) for a tiled GEMM whose output is (batch, rows, cols).
+    """(grid, threadgroup) for the MMA GEMM whose output is (batch, rows, cols).
 
-    The grid is rounded UP to a multiple of _TILE in each output dim so every
-    threadgroup is full (MLX dispatches exactly `grid` threads with non-uniform
-    threadgroups); the kernel bounds-checks output coords and zero-pads the
-    staged tiles for edge tiles.
+    grid is TOTAL threads (MLX non-uniform dispatch): x spans
+    ceil(cols/_BN) threadgroups of _NTHREADS threads each; y spans
+    ceil(rows/_BM) threadgroups (1 thread-row apiece); z = batch. The kernel
+    bounds-checks output coords and zero-pads staged tiles for edge tiles, so
+    arbitrary M/K/N (incl. < 8) are handled.
     """
-    def ceil_tile(x):
-        return ((int(x) + _TILE - 1) // _TILE) * _TILE
-    grid = (ceil_tile(out_cols), ceil_tile(out_rows), int(batch))
-    tg = (_TILE, _TILE, 1)
+    def cdiv(x, t):
+        return (int(x) + t - 1) // t
+    grid = (cdiv(out_cols, _BN) * _NTHREADS, cdiv(out_rows, _BM), int(batch))
+    tg = (_NTHREADS, 1, 1)
     return grid, tg
 
 
 def matmul_forward(a, b):
     Bsz, M, K, N, shared = _mm_dims(a, b)
-    grid, tg = _mm_grid(N, M, Bsz)   # output (Bsz, M, N)
+    grid, tg = _mm_grid(N, M, Bsz)   # output (Bsz, M, N): rows=M, cols=N
     k = _kernel("matmul", "matmul_forward",
-                ["A", "B", "Mb", "Kb", "Nb", "Sh"], ["out"])
+                ["A", "B", "Mb", "Kb", "Nb", "Sh"], ["out"], header=_MM_HEADER)
     out_shape = tuple(a.shape[:-2]) + (M, N)
     (out,) = k(inputs=[a, b, _u32(M), _u32(K), _u32(N), _u32(shared)],
                grid=grid, threadgroup=tg,
@@ -200,9 +208,10 @@ def matmul_forward(a, b):
 def matmul_backward_dA(grad_in, b, dout):
     # grad_in carries A's shape; B's layout (batched/shared) comes from b
     Bsz, M, K, N, shared = _mm_dims(grad_in, b)
-    grid, tg = _mm_grid(K, M, Bsz)   # output (Bsz, M, K)
+    grid, tg = _mm_grid(K, M, Bsz)   # output (Bsz, M, K): rows=M, cols=K
     k = _kernel("matmul", "matmul_backward_dA",
-                ["grad_in", "B", "dC", "Mb", "Kb", "Nb", "Sh"], ["out"])
+                ["grad_in", "B", "dC", "Mb", "Kb", "Nb", "Sh"], ["out"],
+                header=_MM_HEADER)
     (out,) = k(inputs=[grad_in, b, dout, _u32(M), _u32(K), _u32(N), _u32(shared)],
                grid=grid, threadgroup=tg,
                output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
@@ -216,14 +225,16 @@ def matmul_backward_dB(grad_in, a, dout):
     if grad_in.ndim < a.ndim:  # shared: sum over the batch (grid.z = 1)
         grid, tg = _mm_grid(N, K, 1)   # output (K, N), batch folded inside kernel
         k = _kernel("matmul", "matmul_backward_dB_shared",
-                    ["grad_in", "A", "dC", "Mb", "Kb", "Nb", "Bsz"], ["out"])
+                    ["grad_in", "A", "dC", "Mb", "Kb", "Nb", "Bsz"], ["out"],
+                    header=_MM_HEADER)
         (out,) = k(inputs=[grad_in, a, dout, _u32(M), _u32(K), _u32(N), _u32(Bsz)],
                    grid=grid, threadgroup=tg,
                    output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
-    else:                      # batched: one TILE x TILE tile per (b, k, n)
-        grid, tg = _mm_grid(N, K, Bsz)   # output (Bsz, K, N)
+    else:                      # batched: output (Bsz, K, N): rows=K, cols=N
+        grid, tg = _mm_grid(N, K, Bsz)
         k = _kernel("matmul", "matmul_backward_dB_batched",
-                    ["grad_in", "A", "dC", "Mb", "Kb", "Nb"], ["out"])
+                    ["grad_in", "A", "dC", "Mb", "Kb", "Nb"], ["out"],
+                    header=_MM_HEADER)
         (out,) = k(inputs=[grad_in, a, dout, _u32(M), _u32(K), _u32(N)],
                    grid=grid, threadgroup=tg,
                    output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
