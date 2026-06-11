@@ -14,3 +14,6 @@ pandas      # used by triton.testing.perf_report (benchmarking.py CSV/plot outpu
 pytest
 torch
 triton
+mlx         # Apple Silicon only — powers mlxgrad's Metal kernels. On other hosts
+            # pip finds no wheel; that's fine, the mlxgrad tests skip (see
+            # tests/adapters/mlxgrad_adapter.py::available).

@@ -93,3 +93,10 @@ dmypy.json
 __pycache__/
 *.so
 *.DS_Store
+
+# generated benchmark outputs (keep the dirs via .gitkeep, ignore the plots/CSVs)
+*/benchmarks/*.csv
+*/benchmarks/*.png
+
+# agent-local (Claude Code worktrees, settings) — never part of the project
+.claude/

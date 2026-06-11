@@ -9,6 +9,7 @@ from tests.adapters.micrograd_adapter import MicrogradAdapter
 from tests.adapters.minigrad_adapter import MinigradAdapter
 from tests.adapters.tritongrad_adapter import TritongradAdapter
 from tests.adapters.cudagrad_adapter import CudagradAdapter
+from tests.adapters.mlxgrad_adapter import MlxgradAdapter
 
 ADAPTERS = [
     TorchAdapter,
@@ -16,4 +17,5 @@ ADAPTERS = [
     MinigradAdapter,
     TritongradAdapter,
     CudagradAdapter,
+    MlxgradAdapter,
 ]
