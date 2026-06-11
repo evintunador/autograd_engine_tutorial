@@ -35,7 +35,24 @@ On non-Apple hosts the suite skips mlxgrad cleanly (the adapter gates on
 - `kernels/*.metal` — the Metal Shading Language kernel bodies (the tutorial
   content). A pure source directory, never imported as Python.
 - `model.py` / `train.py` / `benchmarking.py` — a small GPT, char-level training
-  on `../input.txt`, and a benchmark harness.
+  on `../input.txt`, and a benchmark harness comparing our kernels against raw MLX
+  and PyTorch's MPS backend.
+
+## Performance
+
+The kernels stay readable but are progressively optimized with Metal threadgroup
+memory, SIMD-group reductions, and `simdgroup_matrix` MMA (the Apple-silicon
+"tensor core" path — usable from inside an `mx.fast.metal_kernel` body via an
+`#include <metal_simdgroup_matrix>` header). `benchmarking.py` times them on the
+same GPU against **raw MLX** (`mx.*` / `mx.fast.*`) and **PyTorch MPS**
+(`python mlxgrad/benchmarking.py --all` → CSV/PNG in `benchmarks/`). Roughly:
+softmax and LayerNorm reach MLX parity; matmul and flash attention land within
+~2× of MLX — the remaining gap is hand-tuned scheduling, beyond this tier's
+educational scope.
+
+> Benchmarking note: MLX is lazily evaluated, so any timing must force `mx.eval`
+> on the result (the harness does) — timing an un-eval'd expression measures only
+> graph construction, not GPU compute.
 
 ## Two things that differ from cudagrad (both because MLX arrays are immutable)
 
