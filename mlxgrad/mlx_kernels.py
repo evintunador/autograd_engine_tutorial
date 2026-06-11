@@ -165,9 +165,29 @@ def _mm_dims(a_like, b_like):
     return Bsz, M, K, N, shared
 
 
+# Tiled GEMM: TILE x TILE threadgroups, each computes a TILE x TILE output tile
+# for one batch (grid.z = Bsz). Must equal TILE in kernels/matmul.metal.
+_TILE = 16
+
+
+def _mm_grid(out_cols, out_rows, batch):
+    """(grid, threadgroup) for a tiled GEMM whose output is (batch, rows, cols).
+
+    The grid is rounded UP to a multiple of _TILE in each output dim so every
+    threadgroup is full (MLX dispatches exactly `grid` threads with non-uniform
+    threadgroups); the kernel bounds-checks output coords and zero-pads the
+    staged tiles for edge tiles.
+    """
+    def ceil_tile(x):
+        return ((int(x) + _TILE - 1) // _TILE) * _TILE
+    grid = (ceil_tile(out_cols), ceil_tile(out_rows), int(batch))
+    tg = (_TILE, _TILE, 1)
+    return grid, tg
+
+
 def matmul_forward(a, b):
     Bsz, M, K, N, shared = _mm_dims(a, b)
-    grid, tg = _launch(Bsz * M * N)
+    grid, tg = _mm_grid(N, M, Bsz)   # output (Bsz, M, N)
     k = _kernel("matmul", "matmul_forward",
                 ["A", "B", "Mb", "Kb", "Nb", "Sh"], ["out"])
     out_shape = tuple(a.shape[:-2]) + (M, N)
@@ -180,7 +200,7 @@ def matmul_forward(a, b):
 def matmul_backward_dA(grad_in, b, dout):
     # grad_in carries A's shape; B's layout (batched/shared) comes from b
     Bsz, M, K, N, shared = _mm_dims(grad_in, b)
-    grid, tg = _launch(Bsz * M * K)
+    grid, tg = _mm_grid(K, M, Bsz)   # output (Bsz, M, K)
     k = _kernel("matmul", "matmul_backward_dA",
                 ["grad_in", "B", "dC", "Mb", "Kb", "Nb", "Sh"], ["out"])
     (out,) = k(inputs=[grad_in, b, dout, _u32(M), _u32(K), _u32(N), _u32(shared)],
@@ -193,15 +213,15 @@ def matmul_backward_dB(grad_in, a, dout):
     # grad_in carries B's shape; shared <=> B is lower-rank than A (2-D weight)
     M, K, N = a.shape[-2], a.shape[-1], grad_in.shape[-1]
     Bsz = a.size // (M * K)
-    if grad_in.ndim < a.ndim:  # shared: sum over the batch
-        grid, tg = _launch(K * N)
+    if grad_in.ndim < a.ndim:  # shared: sum over the batch (grid.z = 1)
+        grid, tg = _mm_grid(N, K, 1)   # output (K, N), batch folded inside kernel
         k = _kernel("matmul", "matmul_backward_dB_shared",
                     ["grad_in", "A", "dC", "Mb", "Kb", "Nb", "Bsz"], ["out"])
         (out,) = k(inputs=[grad_in, a, dout, _u32(M), _u32(K), _u32(N), _u32(Bsz)],
                    grid=grid, threadgroup=tg,
                    output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
-    else:                      # batched: one thread per (b,k,n)
-        grid, tg = _launch(Bsz * K * N)
+    else:                      # batched: one TILE x TILE tile per (b, k, n)
+        grid, tg = _mm_grid(N, K, Bsz)   # output (Bsz, K, N)
         k = _kernel("matmul", "matmul_backward_dB_batched",
                     ["grad_in", "A", "dC", "Mb", "Kb", "Nb"], ["out"])
         (out,) = k(inputs=[grad_in, a, dout, _u32(M), _u32(K), _u32(N)],
