@@ -21,9 +21,8 @@ from tests.core.loader import load_backend
 
 class CudagradAdapter(AdapterABC):
     name = "cudagrad"
-    # Scaffold: only the binary `add` kernel is implemented + verified. Each
-    # kernel phase flips its op/module names on here as it lands.
-    OPS = {"add", "exp", "log", "relu", "neg", "matmul",
+    # Full coverage: every registry op/module is implemented and GPU-verified.
+    OPS = {"add", "sub", "mul", "div", "exp", "log", "relu", "neg", "matmul",
            "softmax", "sum_lastdim", "mean", "var", "std",
            "max_lastdim", "min_lastdim"}
     MODULES = {"linear", "embedding", "layernorm", "attention"}
