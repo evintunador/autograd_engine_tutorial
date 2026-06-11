@@ -372,12 +372,29 @@ def layernorm_backward(x, w, b, dx_in, dw_in, db_in, dout, mean, rstd, rows, D):
 
 
 # --- flash attention: causal attention (forward / backward) ----------------
-# CAUSAL (query i attends keys j<=i). Simple one-thread-per-row (grid = B*H*N);
-# `scale` is the multiplier (= sqrt(D) in the suite), used verbatim. Backward
-# uses Delta[i] = Σ_d O[i,d]·dO[i,d] and accumulates functionally into dQ/dK/dV.
+# CAUSAL (query i attends keys j<=i). COOPERATIVE one-simdgroup-per-row: grid =
+# (32, B*H*N, 1), threadgroup = (32, 1, 1) so each simdgroup owns one row and lane
+# d owns channel d (dot products reduced via simd_sum). `scale` is the multiplier
+# (= sqrt(D) in the suite), used verbatim. Backward uses Delta[i] = Σ_d O[i,d]·dO[i,d]
+# and accumulates functionally into dQ/dK/dV.
+
+def _flash_launch(rows):
+    """(grid, threadgroup) for one 32-lane simdgroup per row.
+
+    1-D launch of 32*rows threads; the kernel derives row = gid>>5, lane = gid&31.
+    We pack several simdgroups per threadgroup (128 lanes = 4 rows) for occupancy;
+    simd_sum still reduces only within each row's 32-lane simdgroup.
+    """
+    total = 32 * int(rows)
+    tg = min(128, total) if total > 0 else 32
+    tg -= tg % 32  # keep threadgroup a whole number of simdgroups
+    if tg == 0:
+        tg = 32
+    return (total, 1, 1), (tg, 1, 1)
+
 
 def flash_attention_forward(Q, K, V, scale, B, H, N, D):
-    grid, tg = _launch(B * H * N)
+    grid, tg = _flash_launch(B * H * N)
     k = _kernel("flash_attention", "flash_forward",
                 ["Q", "K", "V", "scale", "N", "D"], ["O", "LSE"])
     O, LSE = k(inputs=[Q, K, V, _f32(scale), _u32(N), _u32(D)],
@@ -387,7 +404,7 @@ def flash_attention_forward(Q, K, V, scale, B, H, N, D):
 
 
 def flash_attention_backward(Q, K, V, O, dO, dQ_in, dK_in, dV_in, LSE, scale, B, H, N, D):
-    grid, tg = _launch(B * H * N)
+    grid, tg = _flash_launch(B * H * N)
 
     kd = _kernel("flash_attention", "flash_delta", ["O", "dO", "N", "D"], ["Delta"])
     (Delta,) = kd(inputs=[O, dO, _u32(N), _u32(D)],
