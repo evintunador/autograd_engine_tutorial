@@ -61,7 +61,70 @@
 // SHARED-B case the dB kernel sums over BOTH the batch and M dims (that batch
 // sum is exactly what makes the linear-layer weight grad correct) — preserved
 // here by looping the M-contraction over every batch into the one (K,N) grad.
+//
+// ===========================================================================
+// THIS PASS adds two memory-system optimizations on top of the register tiling.
+// Neither changes the math, the bounds-padding, the `+=` accumulation, or the
+// dB batch sum — they only change HOW tiles get from global into shared memory.
+//
+// (1) float4 (128-bit) VECTORIZED SHARED-MEMORY STAGING.
+//     The cooperative global->shared staging used to copy one float per access.
+//     Where the SOURCE row is contiguous in the dimension we walk, 16-byte
+//     aligned, and the per-row count is a multiple of 4, we instead copy a
+//     `float4` (4 floats / one 128-bit transaction). That quarters the number
+//     of load+store instructions and gives perfectly coalesced 128-bit global
+//     reads. It is ONLY applied to loads whose source AND shared destination are
+//     both contiguous along the walked dimension:
+//        * forward  : As (walks contraction k, BK=8) and Bs (walks col n, BN=64)
+//        * dA       : dCs (walks contraction n, BK=8)   [Bs is a transposed
+//                     scatter -> NOT contiguous on the source side -> scalar]
+//        * dB       : dCs (walks col n, BN=64)          [As is a transposed
+//                     scatter -> NOT contiguous on the source side -> scalar]
+//     GUARDS (all must hold or we fall back to the scalar loop, which is always
+//     correct): the contiguous extent is a multiple of 4 (BK=8, BN=64 are, so
+//     the *tile* count is fine — the runtime guard is that the whole 4-wide
+//     group is in bounds, i.e. the row index < extent AND the 4 contiguous
+//     elements all have global index < extent), and the source address of the
+//     group is 16-byte aligned. We check `((uintptr_t)&src) % 16 == 0` at the
+//     group head; if the matrix base / row stride is misaligned (e.g. odd N or K
+//     like the 16/8 test) the check fails per-group and we take the scalar path.
+//     Out-of-range groups (the ragged tail when M/N/K aren't tile multiples)
+//     also take the scalar path so they still pad 0.0f exactly as before.
+//
+// (2) DOUBLE-BUFFERED (software-pipelined) SHARED TILES in the FORWARD engine.
+//     Instead of {load tile; sync; compute; sync} per contraction step (which
+//     stalls compute behind every global load), we keep TWO shared buffers and
+//     overlap: prefetch step t+1 into the "back" buffer while the math units
+//     consume step t from the "front" buffer, then flip. Structure:
+//        load step 0 into buf[0]
+//        __syncthreads()                         (B0: buf[0] is ready to read)
+//        for t in 0 .. n_steps-1:
+//            if t+1 < n_steps: stage step t+1 into buf[(t+1)&1]   (no read of it)
+//            compute on buf[t&1]                                  (reads only buf[t])
+//            __syncthreads()                     (Bt: next buf staged AND current
+//                                                 buf fully read before reuse)
+//     Race-freedom: the only shared reads are the compute on buf[t&1]; that
+//     buffer was filled either by the pre-loop load (t==0) or by the prefetch in
+//     iteration t-1, in BOTH cases followed by a __syncthreads() before this
+//     iteration's compute — so every value read was written by some thread and
+//     made visible by a barrier. The prefetch in iteration t writes buf[(t+1)&1],
+//     a DIFFERENT buffer than the one being read (t&1 != (t+1)&1), so staging and
+//     computing never touch the same buffer in the same iteration. The trailing
+//     barrier guarantees buf[(t+1)&1] is fully staged before iteration t+1 reads
+//     it, AND that buf[t&1] is finished being read before iteration t+1's
+//     prefetch (which targets buf[t&1] again, since (t+2)&1 == t&1) overwrites it.
+//     Deadlock-freedom: n_steps = ceil(CONTRACT/BK) depends only on the
+//     block-uniform CONTRACT, so every thread runs the same trip count and hits
+//     the pre-loop barrier plus exactly one barrier per iteration — all barriers
+//     are reached by all threads. The `if (t+1 < n_steps)` only gates the
+//     prefetch *work*, never a __syncthreads(), so the barrier count stays
+//     uniform and the last step never prefetches out of range.
+//     dA/dB keep the simpler single-buffer loop (their transposed staging makes
+//     a blind double-buffer rewrite harder to prove correct); they still gain
+//     the float4 staging on their contiguous (dCs) side.
+// ===========================================================================
 #include <torch/extension.h>
+#include <stdint.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include "kernels.h"
@@ -77,6 +140,57 @@ constexpr int TN = 4;             // output cols per thread (micro-tile width)
 constexpr int BLOCK_DIM_X = BN / TN;             // 16
 constexpr int BLOCK_DIM_Y = BM / TM;             // 16
 constexpr int BLOCK_THREADS = BLOCK_DIM_X * BLOCK_DIM_Y;  // 256
+
+// ---------------------------------------------------------------------------
+// Vectorized cooperative staging of one ROWS_T x COLS_T shared subtile whose
+// destination `dst[r][c]` and source `src_ptr[src_base + gr*src_rs + (col_base
+// + c)]` are BOTH contiguous along the walked column dimension `c`.
+//
+// dst is passed as a raw float* with row pitch `dst_pitch` (= the declared 2nd
+// dim of the __shared__ array, which may exceed COLS_T if padded; here they are
+// equal). We walk the COLS_T columns in float4 groups when the group is fully
+// in bounds AND its source address is 16-byte aligned; otherwise we copy that
+// group element-by-element with the usual 0.0f bounds padding. COLS_T must be a
+// multiple of 4 for the float4 stride to tile the row exactly (BK=8, BN=64 are).
+//
+// Every shared element of the subtile is written exactly once (each (r,c) is
+// owned by one thread/iteration), so this is a drop-in replacement for the
+// scalar staging loop and preserves the pad-0 contract.
+// ---------------------------------------------------------------------------
+template <int ROWS_T, int COLS_T>
+__device__ __forceinline__ void stage_tile_vec4(
+        float* dst, int dst_pitch,
+        const float* __restrict__ src_ptr, int64_t src_base, int64_t src_rs,
+        int64_t row_base, int64_t col_base, int64_t ROW_EXT, int64_t COL_EXT,
+        int tid) {
+    static_assert(COLS_T % 4 == 0, "vectorized staging needs COLS_T % 4 == 0");
+    constexpr int GROUPS = (ROWS_T * COLS_T) / 4;   // number of float4 groups
+    constexpr int COL_GROUPS = COLS_T / 4;          // float4 groups per row
+    for (int g = tid; g < GROUPS; g += BLOCK_THREADS) {
+        int r = g / COL_GROUPS;            // row within tile
+        int cg = g % COL_GROUPS;           // float4 group within the row
+        int c0 = cg * 4;                   // first column of the group
+        int64_t gr = row_base + r;
+        int64_t gc0 = col_base + c0;
+        const float* s = src_ptr + src_base + gr * src_rs + gc0;
+        bool group_in_bounds = (gr < ROW_EXT) && (gc0 + 3 < COL_EXT);
+        bool aligned = ((uintptr_t)s & 0xF) == 0;
+        if (group_in_bounds && aligned) {
+            float4 v = *reinterpret_cast<const float4*>(s);
+            float* d = dst + r * dst_pitch + c0;
+            d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = v.w;
+        } else {
+            // Ragged/misaligned group: scalar copy with 0.0f padding.
+            #pragma unroll
+            for (int e = 0; e < 4; ++e) {
+                int c = c0 + e;
+                int64_t gc = col_base + c;
+                dst[r * dst_pitch + c] =
+                    (gr < ROW_EXT && gc < COL_EXT) ? s[e] : 0.0f;
+            }
+        }
+    }
+}
 
 // ===========================================================================
 // Generic register-blocked tile engine.
@@ -109,8 +223,10 @@ __device__ __forceinline__ void tile_engine(
         int64_t ROWS, int64_t COLS, int64_t CONTRACT,
         int64_t block_row_base, int64_t block_col_base,
         float acc[TM][TN]) {
-    __shared__ float As[BM][BK];   // LHS subtile: [output-row][contract]
-    __shared__ float Bs[BK][BN];   // RHS subtile: [contract][output-col]
+    // DOUBLE-BUFFERED shared tiles: two copies of each subtile so we can stage
+    // step t+1 while computing step t. Index with t&1.
+    __shared__ float As[2][BM][BK];   // LHS subtile: [buf][output-row][contract]
+    __shared__ float Bs[2][BK][BN];   // RHS subtile: [buf][contract][output-col]
 
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;  // 0..BLOCK_THREADS-1
 
@@ -119,42 +235,46 @@ __device__ __forceinline__ void tile_engine(
     const int thread_col0 = threadIdx.x * TN;   // 0..BN-TN
 
     int64_t n_steps = (CONTRACT + BK - 1) / BK;
-    for (int64_t t = 0; t < n_steps; ++t) {
+    if (n_steps == 0) return;   // empty contraction -> acc stays 0 (no barriers)
+
+    // Stage contraction step `t` into buffer `buf`. As walks the contraction
+    // dim (BK, mult of 4) along contiguous source columns; Bs walks the output-
+    // col dim (BN, mult of 4) along contiguous source columns — both float4-able.
+    auto stage = [&](int64_t t, int buf) {
         int64_t c_base = t * BK;   // contraction offset for this step
+        // As[buf][r][c] = lhs[lhs_base + (block_row_base+r)*lhs_rs + (c_base+c)]
+        stage_tile_vec4<BM, BK>(&As[buf][0][0], BK,
+                                lhs_ptr, lhs_base, lhs_rs,
+                                /*row_base=*/block_row_base, /*col_base=*/c_base,
+                                /*ROW_EXT=*/ROWS, /*COL_EXT=*/CONTRACT, tid);
+        // Bs[buf][c][n] = rhs[rhs_base + (c_base+c)*rhs_rs + (block_col_base+n)]
+        stage_tile_vec4<BK, BN>(&Bs[buf][0][0], BN,
+                                rhs_ptr, rhs_base, rhs_rs,
+                                /*row_base=*/c_base, /*col_base=*/block_col_base,
+                                /*ROW_EXT=*/CONTRACT, /*COL_EXT=*/COLS, tid);
+    };
 
-        // --- Cooperative load of the LHS subtile (BM x BK) -----------------
-        // Flatten the BM*BK elements; each thread strides by BLOCK_THREADS.
-        for (int i = tid; i < BM * BK; i += BLOCK_THREADS) {
-            int r = i / BK;                 // output-row within tile
-            int c = i % BK;                 // contraction within step
-            int64_t gr = block_row_base + r;
-            int64_t gc = c_base + c;
-            As[r][c] = (gr < ROWS && gc < CONTRACT)
-                       ? lhs_ptr[lhs_base + gr * lhs_rs + gc]
-                       : 0.0f;
-        }
-        // --- Cooperative load of the RHS subtile (BK x BN) -----------------
-        for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
-            int c = i / BN;                 // contraction within step
-            int n = i % BN;                 // output-col within tile
-            int64_t gc = c_base + c;
-            int64_t gn = block_col_base + n;
-            Bs[c][n] = (gc < CONTRACT && gn < COLS)
-                       ? rhs_ptr[rhs_base + gc * rhs_rs + gn]
-                       : 0.0f;
-        }
+    // Prologue: stage step 0 into buffer 0.
+    stage(0, 0);
+    __syncthreads();   // B0: buf[0] fully staged & visible before any read
 
-        __syncthreads();   // both subtiles fully staged
+    for (int64_t t = 0; t < n_steps; ++t) {
+        // Prefetch the NEXT step into the OTHER buffer (no read of it here).
+        // Gated only on work, never on a barrier -> trip counts stay uniform.
+        if (t + 1 < n_steps) stage(t + 1, (int)((t + 1) & 1));
 
-        // --- Outer-product accumulation over the BK contraction positions --
+        // --- Outer-product accumulation on the CURRENT buffer (t&1) --------
+        // Every value read here was staged by stage(t,...) before B0 (t==0) or
+        // by the prefetch in iteration t-1 before that iteration's barrier.
+        const int cur = (int)(t & 1);
         #pragma unroll
         for (int cc = 0; cc < BK; ++cc) {
             float a_reg[TM];   // this thread's TM-long slice of A's column cc
             float b_reg[TN];   // this thread's TN-long slice of B's row cc
             #pragma unroll
-            for (int i = 0; i < TM; ++i) a_reg[i] = As[thread_row0 + i][cc];
+            for (int i = 0; i < TM; ++i) a_reg[i] = As[cur][thread_row0 + i][cc];
             #pragma unroll
-            for (int j = 0; j < TN; ++j) b_reg[j] = Bs[cc][thread_col0 + j];
+            for (int j = 0; j < TN; ++j) b_reg[j] = Bs[cur][cc][thread_col0 + j];
             #pragma unroll
             for (int i = 0; i < TM; ++i)
                 #pragma unroll
@@ -162,7 +282,12 @@ __device__ __forceinline__ void tile_engine(
                     acc[i][j] += a_reg[i] * b_reg[j];
         }
 
-        __syncthreads();   // done reading shared before next step overwrites it
+        // Bt: (a) the prefetched buf[(t+1)&1] is fully staged before iteration
+        // t+1 reads it, and (b) the current buf[t&1] is fully read before
+        // iteration t+1's prefetch (which targets buf[(t+2)&1] == buf[t&1])
+        // overwrites it. One barrier per iter, reached by all threads (uniform
+        // trip count) -> race-free and deadlock-free.
+        __syncthreads();
     }
 }
 
@@ -236,15 +361,15 @@ __device__ __forceinline__ void tile_engine_dA(
     for (int64_t t = 0; t < n_steps; ++t) {
         int64_t c_base = t * BK;                 // n offset for this step
 
-        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]
-        for (int i = tid; i < BM * BK; i += BLOCK_THREADS) {
-            int r = i / BK;            // m within tile
-            int c = i % BK;            // n within step
-            int64_t gm = block_row_base + r;
-            int64_t gn = c_base + c;
-            dCs[r][c] = (gm < M && gn < N) ? dC[dc_base + gm * N + gn] : 0.0f;
-        }
-        // Bs[n][k] = B[(b), k, n] = B[b_base + k*N + n]   (transposed load)
+        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]. Source contiguous
+        // along n (the walked column dim) -> float4-vectorized staging. Bs is a
+        // transposed scatter (source stride N) -> stays scalar below.
+        stage_tile_vec4<BM, BK>(&dCs[0][0], BK,
+                                dC, dc_base, /*src_rs=*/N,
+                                /*row_base=*/block_row_base, /*col_base=*/c_base,
+                                /*ROW_EXT=*/M, /*COL_EXT=*/N, tid);
+        // Bs[n][k] = B[(b), k, n] = B[b_base + k*N + n]   (transposed load:
+        // source stride is N as k varies -> NOT contiguous -> scalar staging)
         for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
             int c = i / BN;            // n within step
             int n_k = i % BN;          // k within tile
@@ -335,7 +460,8 @@ __device__ __forceinline__ void tile_engine_dB_onebatch(
     for (int64_t t = 0; t < m_steps; ++t) {
         int64_t c_base = t * BK;                 // m offset for this step
 
-        // As[m][k] = A[b, m, k] = A[a_base + m*K + k]   (transposed load)
+        // As[m][k] = A[b, m, k] = A[a_base + m*K + k]   (transposed load:
+        // source stride is K as k varies -> NOT contiguous -> scalar staging)
         for (int i = tid; i < BK * BM; i += BLOCK_THREADS) {
             int c = i / BM;            // m within step
             int r = i % BM;            // k within tile
@@ -343,14 +469,12 @@ __device__ __forceinline__ void tile_engine_dB_onebatch(
             int64_t gk = block_row_base + r;
             As[c][r] = (gm < M && gk < K) ? A[a_base + gm * K + gk] : 0.0f;
         }
-        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]
-        for (int i = tid; i < BK * BN; i += BLOCK_THREADS) {
-            int c = i / BN;            // m within step
-            int n = i % BN;            // n within tile
-            int64_t gm = c_base + c;
-            int64_t gn = block_col_base + n;
-            dCs[c][n] = (gm < M && gn < N) ? dC[dc_base + gm * N + gn] : 0.0f;
-        }
+        // dCs[m][n] = dC[b, m, n] = dC[dc_base + m*N + n]. Source contiguous
+        // along n (the walked column dim) -> float4-vectorized staging.
+        stage_tile_vec4<BK, BN>(&dCs[0][0], BN,
+                                dC, dc_base, /*src_rs=*/N,
+                                /*row_base=*/c_base, /*col_base=*/block_col_base,
+                                /*ROW_EXT=*/M, /*COL_EXT=*/N, tid);
 
         __syncthreads();
 
