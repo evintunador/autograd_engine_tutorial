@@ -24,6 +24,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("unary_backward", &unary_backward,
           "elementwise unary backward (accumulates into dx)");
 
+    // matmul (forward / backward dA / backward dB)
+    m.def("matmul_forward", &matmul_forward,
+          "matmul forward C = A @ B (batched or shared-2D B)");
+    m.def("matmul_backward_dA", &matmul_backward_dA,
+          "matmul backward w.r.t. A (accumulates into dA)");
+    m.def("matmul_backward_dB", &matmul_backward_dB,
+          "matmul backward w.r.t. B (accumulates; shared B sums over batch)");
+
     // vectorwise: last-dim reductions + softmax
     m.def("reduction_forward", &reduction_forward,
           "last-dim reduction forward (0=sum,1=mean,2=max,3=min,4=var,5=std)");

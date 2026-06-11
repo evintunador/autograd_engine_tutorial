@@ -30,7 +30,7 @@ _KDIR = os.path.join(_HERE, "kernels")
 _SOURCES = [
     os.path.join(_KDIR, "bindings.cpp"),
     os.path.join(_KDIR, "elementwise.cu"),
-    # os.path.join(_KDIR, "matmul.cu"),       # matmul phase
+    os.path.join(_KDIR, "matmul.cu"),         # matmul phase
     os.path.join(_KDIR, "vectorwise.cu"),     # reductions + softmax phase
     # os.path.join(_KDIR, "modules.cu"),      # embedding + layernorm phase
 ]
@@ -82,16 +82,21 @@ def unary_backward(x, dx, out, dout, op):
 # --- not yet implemented (filled in by later kernel phases) ----------------
 
 
+# --- matmul (forward / backward dA / backward dB) --------------------------
+# Launchers read all shapes from the tensors and detect the B layout (batched
+# vs shared-2D) from b.dim() vs a.dim(); these wrappers take only tensors.
+
+
 def matmul_forward(a, b, out):
-    raise NotImplementedError("matmul not implemented yet")
+    _get_ext().matmul_forward(a, b, out)
 
 
 def matmul_backward_dA(b, dA, dout):
-    raise NotImplementedError("matmul not implemented yet")
+    _get_ext().matmul_backward_dA(b, dA, dout)
 
 
 def matmul_backward_dB(a, dB, dout):
-    raise NotImplementedError("matmul not implemented yet")
+    _get_ext().matmul_backward_dB(a, dB, dout)
 
 
 # --- vectorwise: last-dim reductions (sum/mean/max/min/var/std) ------------
