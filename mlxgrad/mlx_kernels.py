@@ -423,16 +423,43 @@ def layernorm_backward(x, w, b, dx_in, dw_in, db_in, dout, mean, rstd, rows, D):
 # <metal_simdgroup_matrix>, passed via the metal_kernel `header` argument.
 # flash_delta keeps the simple one-simdgroup-per-row reduction (it is cheap).
 
-_MMA_HEADER = "#include <metal_simdgroup_matrix>\nusing namespace metal;\n"
+# Round-3 occupancy: pack FLASH_SG simdgroups per threadgroup, each handling an
+# independent (bh, 8-row block). FLASH_SG is injected as a compile constant so the
+# kernel sizes its per-simdgroup threadgroup-memory slices accordingly, and the
+# launch packs that many simdgroups per threadgroup. Each flash kernel is tuned
+# independently (forward and the gradient kernels favour different packing): a
+# larger SG raises occupancy when blocks are scarce (small N) but adds threadgroup
+# -memory pressure that throttles concurrent threadgroups at large N. SG values
+# stay well inside the M2's 32KB threadgroup memory (worst case dQ/dK ~5.75KB per
+# simdgroup). FLASH_SG is also used as the multiple for the softmax/epilogue lane
+# spread, which is independent of packing.
+_FLASH_SG_FWD = 2
+_FLASH_SG_DV = 2
+_FLASH_SG_DQ = 2
+_FLASH_SG_DK = 2
 
 
-def _flash_mma_launch(bh, N):
-    """(grid, threadgroup) for one 32-lane simdgroup per (bh, 8-row block).
+def _mma_header(sg):
+    return (
+        "#include <metal_simdgroup_matrix>\nusing namespace metal;\n"
+        f"#define FLASH_SG {int(sg)}\n"
+    )
 
-    grid.y enumerates bh*ceil(N/8) + block; threadgroup = a single 32-lane simdgroup.
+
+def _flash_mma_launch(bh, N, sg):
+    """(grid, threadgroup) for ``sg`` simdgroups per threadgroup.
+
+    Each simdgroup handles one (bh, 8-row block); the global block index is
+    threadgroup_position_in_grid.y*FLASH_SG + simdgroup_index_in_threadgroup, and
+    simdgroups past the last block guard themselves off. grid.y = ceil(total / sg)
+    groups; threadgroup = sg*32 lanes.
     """
+    sg = int(sg)
     nblk = (int(N) + 7) // 8
-    return (32, int(bh) * nblk, 1), (32, 1, 1)
+    total = int(bh) * nblk
+    ngroups = (total + sg - 1) // sg
+    tg_threads = 32 * sg
+    return (tg_threads, ngroups, 1), (tg_threads, 1, 1)
 
 
 def _flash_delta_launch(rows):
@@ -446,43 +473,45 @@ def _flash_delta_launch(rows):
 
 
 def flash_attention_forward(Q, K, V, scale, B, H, N, D):
-    grid, tg = _flash_mma_launch(B * H, N)
+    grid, tg = _flash_mma_launch(B * H, N, _FLASH_SG_FWD)
     k = _kernel("flash_attention", "flash_forward",
-                ["Q", "K", "V", "scale", "N", "D"], ["O", "LSE"], header=_MMA_HEADER)
-    O, LSE = k(inputs=[Q, K, V, _f32(scale), _u32(N), _u32(D)],
+                ["Q", "K", "V", "scale", "N", "D", "BH"], ["O", "LSE"],
+                header=_mma_header(_FLASH_SG_FWD))
+    O, LSE = k(inputs=[Q, K, V, _f32(scale), _u32(N), _u32(D), _u32(B * H)],
                grid=grid, threadgroup=tg,
                output_shapes=[Q.shape, (B, H, N)], output_dtypes=[Q.dtype, Q.dtype])
     return O, LSE
 
 
 def flash_attention_backward(Q, K, V, O, dO, dQ_in, dK_in, dV_in, LSE, scale, B, H, N, D):
-    grid, tg = _flash_mma_launch(B * H, N)
-
     dgrid, dtg = _flash_delta_launch(B * H * N)
     kd = _kernel("flash_attention", "flash_delta", ["O", "dO", "N", "D"], ["Delta"])
     (Delta,) = kd(inputs=[O, dO, _u32(N), _u32(D)],
                   grid=dgrid, threadgroup=dtg,
                   output_shapes=[(B, H, N)], output_dtypes=[O.dtype])
 
+    gv, tv = _flash_mma_launch(B * H, N, _FLASH_SG_DV)
     kv = _kernel("flash_attention", "flash_dV",
-                 ["dV_in", "Q", "K", "dO", "LSE", "scale", "N", "D"], ["out"],
-                 header=_MMA_HEADER)
-    (dV,) = kv(inputs=[dV_in, Q, K, dO, LSE, _f32(scale), _u32(N), _u32(D)],
-               grid=grid, threadgroup=tg,
+                 ["dV_in", "Q", "K", "dO", "LSE", "scale", "N", "D", "BH"], ["out"],
+                 header=_mma_header(_FLASH_SG_DV))
+    (dV,) = kv(inputs=[dV_in, Q, K, dO, LSE, _f32(scale), _u32(N), _u32(D), _u32(B * H)],
+               grid=gv, threadgroup=tv,
                output_shapes=[Q.shape], output_dtypes=[Q.dtype])
 
+    gq, tq = _flash_mma_launch(B * H, N, _FLASH_SG_DQ)
     kq = _kernel("flash_attention", "flash_dQ",
-                 ["dQ_in", "Q", "K", "V", "dO", "LSE", "Delta", "scale", "N", "D"], ["out"],
-                 header=_MMA_HEADER)
-    (dQ,) = kq(inputs=[dQ_in, Q, K, V, dO, LSE, Delta, _f32(scale), _u32(N), _u32(D)],
-               grid=grid, threadgroup=tg,
+                 ["dQ_in", "Q", "K", "V", "dO", "LSE", "Delta", "scale", "N", "D", "BH"], ["out"],
+                 header=_mma_header(_FLASH_SG_DQ))
+    (dQ,) = kq(inputs=[dQ_in, Q, K, V, dO, LSE, Delta, _f32(scale), _u32(N), _u32(D), _u32(B * H)],
+               grid=gq, threadgroup=tq,
                output_shapes=[Q.shape], output_dtypes=[Q.dtype])
 
+    gk, tk = _flash_mma_launch(B * H, N, _FLASH_SG_DK)
     kk = _kernel("flash_attention", "flash_dK",
-                 ["dK_in", "Q", "K", "V", "dO", "LSE", "Delta", "scale", "N", "D"], ["out"],
-                 header=_MMA_HEADER)
-    (dK,) = kk(inputs=[dK_in, Q, K, V, dO, LSE, Delta, _f32(scale), _u32(N), _u32(D)],
-               grid=grid, threadgroup=tg,
+                 ["dK_in", "Q", "K", "V", "dO", "LSE", "Delta", "scale", "N", "D", "BH"], ["out"],
+                 header=_mma_header(_FLASH_SG_DK))
+    (dK,) = kk(inputs=[dK_in, Q, K, V, dO, LSE, Delta, _f32(scale), _u32(N), _u32(D), _u32(B * H)],
+               grid=gk, threadgroup=tk,
                output_shapes=[Q.shape], output_dtypes=[Q.dtype])
 
     return dQ, dK, dV
