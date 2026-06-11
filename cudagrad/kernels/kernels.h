@@ -20,8 +20,13 @@ void binary_backward_dx(torch::Tensor y, torch::Tensor dx, torch::Tensor dout,
 void binary_backward_dy(torch::Tensor x, torch::Tensor y, torch::Tensor dy,
                         torch::Tensor dout, int64_t loop_stride, int64_t op);
 
+// ---- elementwise unary (op: 0=exp, 1=log, 2=relu, 3=neg) ------------------
+// backward ACCUMULATES into dx (`+=`), so callers pass a zero-initialized dx.
+void unary_forward(torch::Tensor x, torch::Tensor out, int64_t op);
+void unary_backward(torch::Tensor x, torch::Tensor dx, torch::Tensor out,
+                    torch::Tensor dout, int64_t op);
+
 // ---- (future kernel groups declare their launchers below) -----------------
-// unary  (exp/log/relu/neg)      -> elementwise.cu
 // matmul (fwd / bwd_dA / bwd_dB) -> matmul.cu
 // reduction + softmax            -> vectorwise.cu
 // embedding + layernorm          -> modules.cu

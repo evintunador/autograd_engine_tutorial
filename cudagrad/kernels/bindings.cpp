@@ -17,4 +17,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "elementwise binary backward w.r.t. the first operand");
     m.def("binary_backward_dy", &binary_backward_dy,
           "elementwise binary backward w.r.t. the (broadcast) second operand");
+
+    // elementwise unary
+    m.def("unary_forward", &unary_forward,
+          "elementwise unary forward (0=exp,1=log,2=relu,3=neg)");
+    m.def("unary_backward", &unary_backward,
+          "elementwise unary backward (accumulates into dx)");
 }

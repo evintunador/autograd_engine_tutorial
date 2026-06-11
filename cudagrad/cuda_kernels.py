@@ -67,15 +67,19 @@ def binary_backward_dy(x, y, dy, dout, loop_stride, op):
     _get_ext().binary_backward_dy(x, y, dy, dout, loop_stride, _BINARY_OP[op])
 
 
-# --- not yet implemented (filled in by later kernel phases) ----------------
-# Each stub's signature is the suggested contract for the engine call site in
-# engine.py; the implementing sub-agent may adjust both sides together.
+# --- elementwise unary (exp / log / relu / neg) ----------------------------
+_UNARY_OP = {"exp": 0, "log": 1, "relu": 2, "neg": 3}
+
+
 def unary_forward(x, out, op):
-    raise NotImplementedError("unary ops (exp/log/relu/neg) not implemented yet")
+    _get_ext().unary_forward(x, out, _UNARY_OP[op])
 
 
 def unary_backward(x, dx, out, dout, op):
-    raise NotImplementedError("unary ops (exp/log/relu/neg) not implemented yet")
+    _get_ext().unary_backward(x, dx, out, dout, _UNARY_OP[op])
+
+
+# --- not yet implemented (filled in by later kernel phases) ----------------
 
 
 def matmul_forward(a, b, out):

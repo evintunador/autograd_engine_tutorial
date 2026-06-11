@@ -87,6 +87,44 @@ __global__ void binary_backward_dy_kernel(const float* __restrict__ x,
     atomicAdd(&dy[j], contrib);
 }
 
+// ---- unary (op: 0=exp, 1=log, 2=relu, 3=neg) ------------------------------
+// out[i] = UNARY_OP(x[i])
+__global__ void unary_forward_kernel(const float* __restrict__ x,
+                                     float* __restrict__ out,
+                                     int64_t n, int op) {
+    int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float a = x[i];
+    float r;
+    switch (op) {
+        case 0: r = expf(a); break;        // exp
+        case 1: r = logf(a); break;        // log
+        case 2: r = fmaxf(a, 0.0f); break; // relu
+        default: r = -a; break;            // neg
+    }
+    out[i] = r;
+}
+
+// dx[i] += d(out)/d(x[i]) * dout[i]   (ACCUMULATES)
+//   exp: out * dout ;  log: dout / x ;  relu: (out>0)?dout:0 ;  neg: -dout
+__global__ void unary_backward_kernel(const float* __restrict__ x,
+                                      float* __restrict__ dx,
+                                      const float* __restrict__ out,
+                                      const float* __restrict__ dout,
+                                      int64_t n, int op) {
+    int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float g = dout[i];
+    float contrib;
+    switch (op) {
+        case 0: contrib = out[i] * g; break;                 // exp
+        case 1: contrib = g / x[i]; break;                   // log
+        case 2: contrib = (out[i] > 0.0f) ? g : 0.0f; break; // relu
+        default: contrib = -g; break;                        // neg
+    }
+    dx[i] += contrib;
+}
+
 } // namespace
 
 void binary_forward(torch::Tensor x, torch::Tensor y, torch::Tensor out,
@@ -111,4 +149,18 @@ void binary_backward_dy(torch::Tensor x, torch::Tensor y, torch::Tensor dy,
     binary_backward_dy_kernel<<<n_blocks(n), THREADS>>>(
         x.data_ptr<float>(), y.data_ptr<float>(), dy.data_ptr<float>(),
         dout.data_ptr<float>(), n, loop_stride, (int)op);
+}
+
+void unary_forward(torch::Tensor x, torch::Tensor out, int64_t op) {
+    int64_t n = x.numel();
+    unary_forward_kernel<<<n_blocks(n), THREADS>>>(
+        x.data_ptr<float>(), out.data_ptr<float>(), n, (int)op);
+}
+
+void unary_backward(torch::Tensor x, torch::Tensor dx, torch::Tensor out,
+                    torch::Tensor dout, int64_t op) {
+    int64_t n = x.numel();
+    unary_backward_kernel<<<n_blocks(n), THREADS>>>(
+        x.data_ptr<float>(), dx.data_ptr<float>(), out.data_ptr<float>(),
+        dout.data_ptr<float>(), n, (int)op);
 }

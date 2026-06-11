@@ -23,7 +23,7 @@ class CudagradAdapter(AdapterABC):
     name = "cudagrad"
     # Scaffold: only the binary `add` kernel is implemented + verified. Each
     # kernel phase flips its op/module names on here as it lands.
-    OPS = {"add"}
+    OPS = {"add", "exp", "log", "relu", "neg"}
     MODULES = set()
     # matmul/linear/attention accumulate at fp32 and are sensitive, same as
     # tritongrad — pre-seed the loosened tolerances so enabling them is one edit.
