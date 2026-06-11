@@ -26,7 +26,23 @@ void unary_forward(torch::Tensor x, torch::Tensor out, int64_t op);
 void unary_backward(torch::Tensor x, torch::Tensor dx, torch::Tensor out,
                     torch::Tensor dout, int64_t op);
 
+// ---- vectorwise: last-dim reductions + softmax ----------------------------
+// Tensors are viewed as (n_rows, n_cols) and reduced/softmaxed along the last
+// dim. reduction op codes: 0=sum, 1=mean, 2=max, 3=min, 4=var, 5=std (var/std
+// use population /n normalization). Backward launchers ACCUMULATE into dx (`+=`),
+// so callers pass a zero-initialized dx. reduction_backward also takes `out` (the
+// forward result) for ops that need it (std). softmax_backward takes `y` (the
+// forward softmax output).
+void reduction_forward(torch::Tensor x, torch::Tensor out,
+                       int64_t n_rows, int64_t n_cols, int64_t op);
+void reduction_backward(torch::Tensor x, torch::Tensor dx, torch::Tensor dout,
+                        torch::Tensor out, int64_t n_rows, int64_t n_cols,
+                        int64_t op);
+void softmax_forward(torch::Tensor x, torch::Tensor out,
+                     int64_t n_rows, int64_t n_cols);
+void softmax_backward(torch::Tensor y, torch::Tensor dx, torch::Tensor dout,
+                      int64_t n_rows, int64_t n_cols);
+
 // ---- (future kernel groups declare their launchers below) -----------------
 // matmul (fwd / bwd_dA / bwd_dB) -> matmul.cu
-// reduction + softmax            -> vectorwise.cu
 // embedding + layernorm          -> modules.cu

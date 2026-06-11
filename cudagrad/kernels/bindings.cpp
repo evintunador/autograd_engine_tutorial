@@ -23,4 +23,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "elementwise unary forward (0=exp,1=log,2=relu,3=neg)");
     m.def("unary_backward", &unary_backward,
           "elementwise unary backward (accumulates into dx)");
+
+    // vectorwise: last-dim reductions + softmax
+    m.def("reduction_forward", &reduction_forward,
+          "last-dim reduction forward (0=sum,1=mean,2=max,3=min,4=var,5=std)");
+    m.def("reduction_backward", &reduction_backward,
+          "last-dim reduction backward (accumulates into dx)");
+    m.def("softmax_forward", &softmax_forward,
+          "last-dim numerically-stable softmax forward");
+    m.def("softmax_backward", &softmax_backward,
+          "last-dim softmax backward (accumulates into dx)");
 }

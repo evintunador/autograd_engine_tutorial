@@ -31,7 +31,7 @@ _SOURCES = [
     os.path.join(_KDIR, "bindings.cpp"),
     os.path.join(_KDIR, "elementwise.cu"),
     # os.path.join(_KDIR, "matmul.cu"),       # matmul phase
-    # os.path.join(_KDIR, "vectorwise.cu"),   # reductions + softmax phase
+    os.path.join(_KDIR, "vectorwise.cu"),     # reductions + softmax phase
     # os.path.join(_KDIR, "modules.cu"),      # embedding + layernorm phase
 ]
 
@@ -94,20 +94,26 @@ def matmul_backward_dB(a, dB, dout):
     raise NotImplementedError("matmul not implemented yet")
 
 
+# --- vectorwise: last-dim reductions (sum/mean/max/min/var/std) ------------
+# var/std use population (/n) normalization, matching torch.var/std(unbiased=False).
+_REDUCTION_OP = {"sum": 0, "mean": 1, "max": 2, "min": 3, "var": 4, "std": 5}
+
+
 def reduction_forward(x, out, n_rows, n_cols, op):
-    raise NotImplementedError("reductions (sum/mean/var/std/max/min) not implemented yet")
+    _get_ext().reduction_forward(x, out, n_rows, n_cols, _REDUCTION_OP[op])
 
 
 def reduction_backward(x, dx, dout, out, n_rows, n_cols, op):
-    raise NotImplementedError("reductions (sum/mean/var/std/max/min) not implemented yet")
+    _get_ext().reduction_backward(x, dx, dout, out, n_rows, n_cols,
+                                  _REDUCTION_OP[op])
 
 
 def softmax_forward(x, out, n_rows, n_cols):
-    raise NotImplementedError("softmax not implemented yet")
+    _get_ext().softmax_forward(x, out, n_rows, n_cols)
 
 
 def softmax_backward(out, dx, dout, n_rows, n_cols):
-    raise NotImplementedError("softmax not implemented yet")
+    _get_ext().softmax_backward(out, dx, dout, n_rows, n_cols)
 
 
 def embedding_forward(*args, **kwargs):
