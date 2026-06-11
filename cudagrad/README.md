@@ -33,7 +33,10 @@ but every operation's math runs in our own `.cu` kernels — never PyTorch's ops
 
 Unlike tritongrad, the backward pass needs **no warmup dance**: CUDA kernels don't
 autotune, so a single `backward()` accumulates each gradient exactly once into the
-zero-initialized `.grad` buffers.
+zero-initialized `.grad` buffers. Those buffers are allocated **lazily** (a `grad`
+property zeros them on first access, not at construction), so forward-only paths
+never pay for a grad memset — the accumulate-into-zeroed-buffer contract the
+backward kernels rely on still holds.
 
 ## Testing
 
@@ -52,8 +55,33 @@ against PyTorch (`pytest tests/ -k cudagrad` → 20/20). Kernel groups:
 `elementwise.cu` (binary add/sub/mul/div + unary exp/log/relu/neg),
 `vectorwise.cu` (sum/mean/max/min/var/std + softmax), `matmul.cu` (batched +
 shared-weight, enables `linear`), `modules.cu` (embedding + layernorm), and
-`flash_attention.cu` (a non-tiled causal attention — a correctness reference, not
-tritongrad's tiled online-softmax flash; a candidate for a future upgrade).
+`flash_attention.cu` (causal attention: a query-tiled online-softmax flash
+forward + an obviously-correct cooperative backward).
+
+## Performance
+
+The kernels started as the simplest correct thing (one thread per output element
+or per row) and were then optimized — still readable, but no longer naive. The
+techniques, by group:
+
+- **elementwise** — grid-stride loops + `float4` vectorized loads/stores (scalar
+  fallback for broadcast / unaligned / non-mult-of-4 tails).
+- **vectorwise & layernorm** — one **block per row** with shared-memory tree
+  reductions, replacing the one-thread-per-row serial loops.
+- **matmul** — shared-memory **tiling** + **register blocking** (each thread owns
+  a micro-tile) + double-buffering and `float4` shared loads.
+- **flash attention (fwd)** — **query-tiling**: each block loads a K/V tile to
+  shared memory once and reuses it across many query rows (online softmax).
+- **engine** — lazy `.grad` allocation lifts every forward op off the grad-memset
+  overhead.
+
+Measured against PyTorch's own ops (`benchmarking.py`, fp32, one GPU), most ops
+land at **~70–110% of PyTorch** (elementwise / reductions / layernorm forward and
+several backward passes reach or beat parity; matmul forward is at parity). The
+one laggard is **flash attention** (~9% forward, the K/V-reuse win notwithstanding):
+a competitive flash needs warp-cooperative register tiling, which is beyond this
+tutorial's "readable raw CUDA" remit. Run the numbers yourself with
+`cd cudagrad && python benchmarking.py --all`.
 
 `model.py` builds a GPT from `nn.py`; `train.py` trains it char-level on
 `../input.txt` (`cd cudagrad && python train.py`). `benchmarking.py` compares the
