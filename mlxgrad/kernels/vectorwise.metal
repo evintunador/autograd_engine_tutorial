@@ -29,22 +29,58 @@
 // kernel body.
 
 // @kernel reduction_forward
-// out[r] = REDUCE_c x[r, c]   (one threadgroup per row r)
+// out[r] = REDUCE_c x[r, c].
+//
+// TWO LAUNCH MODES (chosen in the wrapper from n_cols), selected by rpt[0] =
+// rows-per-threadgroup:
+//   * NARROW (rpt > 1, used when NC <= 32): ONE SIMDGROUP PER ROW. Each
+//     simdgroup reduces its row with a single simd_* op — no threadgroup memory,
+//     no barriers, and every lane does useful work. We pack rpt simdgroups per
+//     threadgroup so many rows stay resident, recovering the row-parallelism a
+//     one-thread-per-row design has while keeping the SIMD reduction.
+//   * WIDE (rpt == 1): ONE THREADGROUP PER ROW (grid-strided column loop + SIMD
+//     + threadgroup-memory merge of the per-simdgroup partials).
+uint opc  = op[0];
+uint NC   = n_cols[0];
+uint RPT  = rpt[0];
+uint sl   = thread_index_in_simdgroup;
+bool wantMax = (opc == 2u);
+bool wantMin = (opc == 3u);
+
+if (RPT > 1u) {
+    // ---- NARROW: one simdgroup per row, NC <= 32 ----
+    uint sg  = simdgroup_index_in_threadgroup;
+    uint r   = threadgroup_position_in_grid.x * RPT + sg;
+    if (r >= n_rows[0]) return;
+    uint base = r * NC;
+    float v = (sl < NC) ? x[base + sl] : (wantMax ? -INFINITY : (wantMin ? INFINITY : 0.0f));
+    if (wantMax) {
+        out[r] = simd_max(v);
+    } else if (wantMin) {
+        out[r] = simd_min(v);
+    } else {
+        float s = simd_sum(v);
+        if (opc == 0u)       out[r] = s;                       // sum
+        else if (opc == 1u)  out[r] = s / (float)NC;           // mean
+        else {                                                 // var / std
+            float mean = s / (float)NC;
+            float d = (sl < NC) ? (x[base + sl] - mean) : 0.0f;
+            float varv = simd_sum(d * d) / (float)NC;
+            out[r] = (opc == 4u) ? varv : metal::sqrt(varv);
+        }
+    }
+    return;
+}
+
 uint r    = threadgroup_position_in_grid.x;
 uint lane = thread_position_in_threadgroup.x;
 uint sg   = simdgroup_index_in_threadgroup;
-uint sl   = thread_index_in_simdgroup;
 uint TPT  = threads_per_threadgroup.x;
 uint NSG  = (TPT + 31u) / 32u;
-uint NC   = n_cols[0];
 uint base = r * NC;
-uint opc  = op[0];
 
 threadgroup float tg_a[8u];
 threadgroup float tg_b[8u];
-
-bool wantMax = (opc == 2u);
-bool wantMin = (opc == 3u);
 
 // ---- pass 1: row sum (for sum/mean/var/std) or row max/min ----
 float p;
@@ -104,17 +140,57 @@ if (opc == 0u) {            // sum
 }
 
 // @kernel reduction_backward
-// out[r,c] = grad_in[r,c] + d(out_fwd[r])/d(x[r,c]) * dout[r]  (one TG per row)
-// out_fwd[r] holds the forward reduction result (used by std). dout has n_rows elems.
+// out[r,c] = grad_in[r,c] + d(out_fwd[r])/d(x[r,c]) * dout[r].
+// out_fwd[r] holds the forward reduction result (used by std). dout has n_rows
+// elems. Two launch modes mirroring reduction_forward (see rpt below).
+uint opc  = op[0];
+uint NC   = n_cols[0];
+uint RPT  = rpt[0];
+uint sl   = thread_index_in_simdgroup;
+
+if (RPT > 1u) {
+    // ---- NARROW: one simdgroup per row, NC <= 32 ----
+    uint sg  = simdgroup_index_in_threadgroup;
+    uint r   = threadgroup_position_in_grid.x * RPT + sg;
+    if (r >= n_rows[0]) return;
+    uint base = r * NC;
+    float g   = dout[r];
+    bool in   = (sl < NC);
+    uint idx  = base + sl;
+    // All lanes run the simd reductions (out-of-range lanes contribute the
+    // identity); only in-range lanes write back.
+    if (opc == 0u) {                 // sum
+        if (in) out[idx] = grad_in[idx] + g;
+    } else if (opc == 1u) {          // mean
+        if (in) out[idx] = grad_in[idx] + g / (float)NC;
+    } else if (opc == 2u || opc == 3u) {  // max/min: grad to first arg-extreme
+        float xv  = in ? x[idx] : (opc == 2u ? -INFINITY : INFINITY);
+        float ext = (opc == 2u) ? simd_max(xv) : simd_min(xv);
+        // first column equal to the extreme (smallest lane index)
+        uint cand = (in && xv == ext) ? sl : NC;
+        uint argm = simd_min(cand);
+        if (in) out[idx] = grad_in[idx] + ((sl == argm) ? g : 0.0f);
+    } else {                         // var / std
+        float sv = (opc == 5u) ? out_fwd[r] : 1.0f;
+        if (opc == 5u && sv == 0.0f) {
+            if (in) out[idx] = grad_in[idx];
+        } else {
+            float xv   = in ? x[idx] : 0.0f;
+            float mean = simd_sum(xv) / (float)NC;
+            float coef = (opc == 4u) ? (g * 2.0f / (float)NC)
+                                     : (g / ((float)NC * sv));
+            if (in) out[idx] = grad_in[idx] + coef * (xv - mean);
+        }
+    }
+    return;
+}
+
 uint r    = threadgroup_position_in_grid.x;
 uint lane = thread_position_in_threadgroup.x;
 uint sg   = simdgroup_index_in_threadgroup;
-uint sl   = thread_index_in_simdgroup;
 uint TPT  = threads_per_threadgroup.x;
 uint NSG  = (TPT + 31u) / 32u;
-uint NC   = n_cols[0];
 uint base = r * NC;
-uint opc  = op[0];
 float g   = dout[r];
 
 threadgroup float tg_a[8u];
@@ -183,14 +259,31 @@ if (opc == 0u) {            // sum: +dout
 }
 
 // @kernel softmax_forward
-// out[r, c] = softmax(x[r, :])_c   (numerically stable; one threadgroup per row)
+// out[r, c] = softmax(x[r, :])_c   (numerically stable). Two launch modes
+// mirroring reduction_forward (see rpt below).
+uint NC   = n_cols[0];
+uint RPT  = rpt[0];
+uint sl   = thread_index_in_simdgroup;
+
+if (RPT > 1u) {
+    // ---- NARROW: one simdgroup per row, NC <= 32 ----
+    uint sg  = simdgroup_index_in_threadgroup;
+    uint r   = threadgroup_position_in_grid.x * RPT + sg;
+    if (r >= n_rows[0]) return;
+    uint base = r * NC;
+    float xv = (sl < NC) ? x[base + sl] : -INFINITY;
+    float mx = simd_max(xv);
+    float e  = (sl < NC) ? metal::exp(xv - mx) : 0.0f;
+    float denom = simd_sum(e);
+    if (sl < NC) out[base + sl] = e / denom;
+    return;
+}
+
 uint r    = threadgroup_position_in_grid.x;
 uint lane = thread_position_in_threadgroup.x;
 uint sg   = simdgroup_index_in_threadgroup;
-uint sl   = thread_index_in_simdgroup;
 uint TPT  = threads_per_threadgroup.x;
 uint NSG  = (TPT + 31u) / 32u;
-uint NC   = n_cols[0];
 uint base = r * NC;
 
 threadgroup float tg_a[8u];
@@ -229,14 +322,31 @@ for (uint c = lane; c < NC; c += TPT) out[base + c] /= denom;
 
 // @kernel softmax_backward
 // out[r,c] = grad_in[r,c] + y[r,c] * (dout[r,c] - dot[r]),  dot[r] = sum_c dout*y
-// (one threadgroup per row). y is the forward softmax output.
+// y is the forward softmax output. Two launch modes (see rpt below).
+uint NC   = n_cols[0];
+uint RPT  = rpt[0];
+uint sl   = thread_index_in_simdgroup;
+
+if (RPT > 1u) {
+    // ---- NARROW: one simdgroup per row, NC <= 32 ----
+    uint sg  = simdgroup_index_in_threadgroup;
+    uint r   = threadgroup_position_in_grid.x * RPT + sg;
+    if (r >= n_rows[0]) return;
+    uint base = r * NC;
+    // All lanes participate in the simd reduction (out-of-range lanes add 0) so
+    // simd_sum sees the full simdgroup; only in-range lanes write back.
+    float yv = (sl < NC) ? y[base + sl] : 0.0f;
+    float dv = (sl < NC) ? dout[base + sl] : 0.0f;
+    float d  = simd_sum(dv * yv);
+    if (sl < NC) out[base + sl] = grad_in[base + sl] + yv * (dv - d);
+    return;
+}
+
 uint r    = threadgroup_position_in_grid.x;
 uint lane = thread_position_in_threadgroup.x;
 uint sg   = simdgroup_index_in_threadgroup;
-uint sl   = thread_index_in_simdgroup;
 uint TPT  = threads_per_threadgroup.x;
 uint NSG  = (TPT + 31u) / 32u;
-uint NC   = n_cols[0];
 uint base = r * NC;
 
 threadgroup float tg_a[8u];

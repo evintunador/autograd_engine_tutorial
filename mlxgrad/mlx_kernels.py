@@ -267,46 +267,69 @@ def _vec_tg(n_cols):
     return max(_VEC_SIMD, min(_VEC_TG_MAX, tg))
 
 
-def _launch_rows(n_rows, n_cols):
-    """(grid, threadgroup): one threadgroup (sized to n_cols) per row."""
+# Narrow rows (n_cols <= 32) get a SECOND launch mode: ONE SIMDGROUP PER ROW.
+# Several (_VEC_NARROW_RPT) simdgroups are packed per threadgroup, so each
+# 32-lane simdgroup reduces one whole row with a single simd_* op — no
+# threadgroup memory, no barriers, every lane doing useful work. This recovers
+# the row-parallelism the simple one-thread-per-row design had (round 1's
+# narrow-row regression) while keeping the SIMD reduction. The kernels branch on
+# rpt[0]: rpt > 1 selects the narrow path, rpt == 1 the wide threadgroup-per-row
+# path. n_rows[0] bounds the last (possibly partly-empty) threadgroup.
+_VEC_NARROW_MAX = 32   # narrow path requires the whole row to fit one simdgroup
+_VEC_NARROW_RPT = 8    # simdgroups (= rows) per threadgroup -> 256 threads
+
+
+def _vec_launch(n_rows, n_cols):
+    """((grid, threadgroup), rpt): pick narrow (one simdgroup per row) vs wide
+    (one threadgroup per row) from n_cols. rpt is the rows-per-threadgroup the
+    kernel reads to select its path (1 == wide)."""
     nr = max(int(n_rows), 1)
-    tg = _vec_tg(n_cols)
-    return (tg * nr, 1, 1), (tg, 1, 1)
+    nc = max(int(n_cols), 1)
+    if nc <= _VEC_NARROW_MAX:
+        rpt = _VEC_NARROW_RPT
+        ntg = (nr + rpt - 1) // rpt          # threadgroups to cover all rows
+        tg = rpt * _VEC_SIMD                  # rpt simdgroups of 32 lanes
+        return ((tg * ntg, 1, 1), (tg, 1, 1)), rpt
+    tg = _vec_tg(nc)
+    return ((tg * nr, 1, 1), (tg, 1, 1)), 1
 
 
 def reduction_forward(x, n_rows, n_cols, op):
-    grid, tg = _launch_rows(n_rows, n_cols)
-    k = _kernel("vectorwise", "reduction_forward", ["x", "n_cols", "op"], ["out"])
-    (out,) = k(inputs=[x, _u32(n_cols), _u32(_REDUCTION_OP[op])],
+    (grid, tg), rpt = _vec_launch(n_rows, n_cols)
+    k = _kernel("vectorwise", "reduction_forward",
+                ["x", "n_cols", "n_rows", "rpt", "op"], ["out"])
+    (out,) = k(inputs=[x, _u32(n_cols), _u32(n_rows), _u32(rpt), _u32(_REDUCTION_OP[op])],
                grid=grid, threadgroup=tg,
                output_shapes=[x.shape[:-1]], output_dtypes=[x.dtype])
     return out
 
 
 def reduction_backward(grad_in, x, dout, out_fwd, n_rows, n_cols, op):
-    grid, tg = _launch_rows(n_rows, n_cols)
+    (grid, tg), rpt = _vec_launch(n_rows, n_cols)
     k = _kernel("vectorwise", "reduction_backward",
-                ["grad_in", "x", "dout", "out_fwd", "n_cols", "op"], ["out"])
-    (out,) = k(inputs=[grad_in, x, dout, out_fwd, _u32(n_cols), _u32(_REDUCTION_OP[op])],
+                ["grad_in", "x", "dout", "out_fwd", "n_cols", "n_rows", "rpt", "op"], ["out"])
+    (out,) = k(inputs=[grad_in, x, dout, out_fwd, _u32(n_cols), _u32(n_rows),
+                       _u32(rpt), _u32(_REDUCTION_OP[op])],
                grid=grid, threadgroup=tg,
                output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
     return out
 
 
 def softmax_forward(x, n_rows, n_cols):
-    grid, tg = _launch_rows(n_rows, n_cols)
-    k = _kernel("vectorwise", "softmax_forward", ["x", "n_cols"], ["out"])
-    (out,) = k(inputs=[x, _u32(n_cols)],
+    (grid, tg), rpt = _vec_launch(n_rows, n_cols)
+    k = _kernel("vectorwise", "softmax_forward",
+                ["x", "n_cols", "n_rows", "rpt"], ["out"])
+    (out,) = k(inputs=[x, _u32(n_cols), _u32(n_rows), _u32(rpt)],
                grid=grid, threadgroup=tg,
                output_shapes=[x.shape], output_dtypes=[x.dtype])
     return out
 
 
 def softmax_backward(grad_in, out_fwd, dout, n_rows, n_cols):
-    grid, tg = _launch_rows(n_rows, n_cols)
+    (grid, tg), rpt = _vec_launch(n_rows, n_cols)
     k = _kernel("vectorwise", "softmax_backward",
-                ["grad_in", "y", "dout", "n_cols"], ["out"])
-    (out,) = k(inputs=[grad_in, out_fwd, dout, _u32(n_cols)],
+                ["grad_in", "y", "dout", "n_cols", "n_rows", "rpt"], ["out"])
+    (out,) = k(inputs=[grad_in, out_fwd, dout, _u32(n_cols), _u32(n_rows), _u32(rpt)],
                grid=grid, threadgroup=tg,
                output_shapes=[grad_in.shape], output_dtypes=[grad_in.dtype])
     return out
@@ -370,8 +393,11 @@ def layernorm_backward(x, w, b, dx_in, dw_in, db_in, dout, mean, rstd, rows, D):
     (dx,) = kdx(inputs=[dx_in, x, w, dout, mean, rstd, _u32(D)],
                 grid=grid, threadgroup=tg,
                 output_shapes=[x.shape], output_dtypes=[x.dtype])
-    # dw/db: one thread per feature d, gather over rows (no atomics)
-    grid, tg = _launch(D)
+    # dw/db: ONE THREADGROUP PER FEATURE d; the TG threads split the row gather
+    # (no atomics — each feature owns its output). TG sized to ROWS (mult. of 32,
+    # in [32,256]) so small-D launches still fill the GPU.
+    twb = max(32, min(256, ((int(rows) + 31) // 32) * 32))
+    grid, tg = (int(D) * twb, 1, 1), (twb, 1, 1)
     kwb = _kernel("modules", "layernorm_backward_dwdb",
                   ["dw_in", "db_in", "x", "dout", "mean", "rstd", "D", "rows"],
                   ["dw", "db"])

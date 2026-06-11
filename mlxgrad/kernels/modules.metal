@@ -59,42 +59,40 @@ uint D_ = D[0];
 float eps = epsb[0];
 uint base = r * D_;
 
-threadgroup float partial[32];   // <=32 simdgroups (TG<=1024); holds simd partials
+threadgroup float psum[8];     // per-simdgroup partial Σ(x-K)  (TG<=256 -> <=8 sg)
+threadgroup float psq[8];      // per-simdgroup partial Σ(x-K)²
+threadgroup float bc[2];       // [0]=mean, [1]=rstd broadcast
 uint lane = thread_index_in_simdgroup;
 uint sgid = simdgroup_index_in_threadgroup;
 uint nsimd = (tgsize + 31u) / 32u;
 
-// --- pass 1: mean ---
-float s = 0.0f;
-for (uint d = tid; d < D_; d += tgsize) s += x[base + d];
+// --- SINGLE fused pass (one read of x), numerically stable via SHIFTED data ---
+// Reduce Σ(x-K) and Σ(x-K)² with K = x[base] (the row's first element) as the
+// shift, then mean = K + Σ(x-K)/D and var = (Σ(x-K)² - (Σ(x-K))²/D)/D. Shifting
+// by an in-row value keeps the deviations small, so the sum-of-squares identity
+// no longer cancels catastrophically (the raw E[x²]-mean² form did: e.g. D=1,
+// where var is exactly 0). One read of x instead of the two-pass mean+variance,
+// cutting the reduction-phase memory traffic.
+float K = x[base];
+float s = 0.0f, sq = 0.0f;
+for (uint d = tid; d < D_; d += tgsize) { float v = x[base + d] - K; s += v; sq += v * v; }
 s = simd_sum(s);
-if (lane == 0) partial[sgid] = s;
+sq = simd_sum(sq);
+if (lane == 0) { psum[sgid] = s; psq[sgid] = sq; }
 threadgroup_barrier(mem_flags::mem_threadgroup);
 if (tid == 0) {
-    float tot = 0.0f;
-    for (uint i = 0; i < nsimd; ++i) tot += partial[i];
-    partial[0] = tot / (float)D_;        // store mean for broadcast
+    float ts = 0.0f, tsq = 0.0f;
+    for (uint i = 0; i < nsimd; ++i) { ts += psum[i]; tsq += psq[i]; }
+    float mu = K + ts / (float)D_;
+    float var = (tsq - ts * ts / (float)D_) / (float)D_;  // population (/D)
+    var = metal::max(var, 0.0f);             // guard tiny negative from rounding
+    float rs = 1.0f / metal::sqrt(var + eps);
+    bc[0] = mu; bc[1] = rs;
+    mean[r] = mu; rstd[r] = rs;
 }
 threadgroup_barrier(mem_flags::mem_threadgroup);
-float mu = partial[0];
-threadgroup_barrier(mem_flags::mem_threadgroup);
-
-// --- pass 2: population variance ---
-float acc = 0.0f;
-for (uint d = tid; d < D_; d += tgsize) { float diff = x[base + d] - mu; acc += diff * diff; }
-acc = simd_sum(acc);
-if (lane == 0) partial[sgid] = acc;
-threadgroup_barrier(mem_flags::mem_threadgroup);
-if (tid == 0) {
-    float tot = 0.0f;
-    for (uint i = 0; i < nsimd; ++i) tot += partial[i];
-    float var = tot / (float)D_;         // population (/D) normalization
-    partial[0] = 1.0f / metal::sqrt(var + eps);   // store rstd for broadcast
-    mean[r] = mu;
-    rstd[r] = partial[0];
-}
-threadgroup_barrier(mem_flags::mem_threadgroup);
-float rs = partial[0];
+float mu = bc[0];
+float rs = bc[1];
 
 // --- normalize + affine (each thread writes its strided slice) ---
 for (uint d = tid; d < D_; d += tgsize) {
@@ -152,17 +150,38 @@ for (uint d = tid; d < D_; d += tgsize) {
 
 // @kernel layernorm_backward_dwdb
 // dw[d] = dw_in[d] + Σ_r dout[r,d]*xhat[r,d] ;  db[d] = db_in[d] + Σ_r dout[r,d]
-// ONE THREAD PER FEATURE d (grid = D); gathers over rows (race-free, no atomics).
-uint d = thread_position_in_grid.x;
-uint D_ = D[0];
-uint ROWS = rows[0];
-float accw = dw_in[d];
-float accb = db_in[d];
-for (uint r = 0; r < ROWS; ++r) {
+// ONE THREADGROUP PER FEATURE d (grid = D*TG, threadgroup = TG): the TG threads
+// split the ROWS gather via a grid-strided row loop, then simd_sum + a tg-memory
+// merge of the per-simdgroup partials reduce to the final dw[d]/db[d]. This keeps
+// the scatter-add atomic-free (each feature owns its output) while giving small-D
+// launches enough threads to fill the GPU — the old one-thread-per-feature design
+// left only D threads resident (e.g. D=128), starving occupancy.
+uint d      = threadgroup_position_in_grid.x;
+uint tid    = thread_position_in_threadgroup.x;
+uint tgsize = threads_per_threadgroup.x;
+uint D_     = D[0];
+uint ROWS   = rows[0];
+uint lane   = thread_index_in_simdgroup;
+uint sgid   = simdgroup_index_in_threadgroup;
+uint nsimd  = (tgsize + 31u) / 32u;
+
+threadgroup float pw[8];   // per-simdgroup partial dw (TG<=256 -> <=8 simdgroups)
+threadgroup float pb[8];   // per-simdgroup partial db
+
+float accw = 0.0f, accb = 0.0f;
+for (uint r = tid; r < ROWS; r += tgsize) {
     float xhat = (x[r * D_ + d] - mean[r]) * rstd[r];
     float g = dout[r * D_ + d];
     accw += g * xhat;
     accb += g;
 }
-dw[d] = accw;
-db[d] = accb;
+accw = simd_sum(accw);
+accb = simd_sum(accb);
+if (lane == 0) { pw[sgid] = accw; pb[sgid] = accb; }
+threadgroup_barrier(mem_flags::mem_threadgroup);
+if (tid == 0) {
+    float tw = 0.0f, tb = 0.0f;
+    for (uint i = 0; i < nsimd; ++i) { tw += pw[i]; tb += pb[i]; }
+    dw[d] = dw_in[d] + tw;
+    db[d] = db_in[d] + tb;
+}
