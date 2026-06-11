@@ -40,7 +40,7 @@ from engine import CudaTensor, DEVICE
 import nn
 
 
-BATCH = 32
+BATCH = 8
 
 
 ########################################################################################
@@ -65,7 +65,7 @@ def generate_unary_op_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['tot_elements'],
-                    x_vals=[2**i for i in range(12, 24, 1)],
+                    x_vals=[2**i for i in range(12, 21, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'cuda'],
                     line_names=['PyTorch', 'CUDA'],
@@ -140,7 +140,7 @@ def generate_binary_op_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['tot_elements'],
-                    x_vals=[2**i for i in range(12, 24, 1)],
+                    x_vals=[2**i for i in range(12, 21, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'cuda'],
                     line_names=['PyTorch', 'CUDA'],
@@ -204,7 +204,7 @@ for _mode in ["fwd", "bwd"]:
     matmul_configs.append(
         triton.testing.Benchmark(
             x_names=['M', 'N', 'K'],
-            x_vals=[128 * i for i in range(2, 28, 1)],
+            x_vals=[128 * i for i in range(2, 10, 1)],
             line_arg='provider',
             line_vals=['torch', 'cuda'],
             line_names=['PyTorch', 'CUDA'],
@@ -266,7 +266,7 @@ def generate_reduction_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['tot_elements'],
-                    x_vals=[2**i for i in range(12, 24, 1)],
+                    x_vals=[2**i for i in range(12, 21, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'cuda'],
                     line_names=['PyTorch', 'CUDA'],
@@ -321,7 +321,7 @@ for _mode in ["fwd", "bwd"]:
     softmax_configs.append(
         triton.testing.Benchmark(
             x_names=['tot_elements'],
-            x_vals=[2**i for i in range(12, 24, 1)],
+            x_vals=[2**i for i in range(12, 21, 1)],
             line_arg='provider',
             line_vals=['torch', 'cuda'],
             line_names=['PyTorch', 'CUDA'],
@@ -381,7 +381,7 @@ def generate_layernorm_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['D'],
-                    x_vals=[256 * i for i in range(1, 12, 1)],
+                    x_vals=[256 * i for i in range(1, 9, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'cuda'],
                     line_names=['PyTorch', 'CUDA'],
@@ -396,7 +396,7 @@ def generate_layernorm_configs(ops):
 @triton.testing.perf_report(layernorm_configs)
 def benchmark_layernorm(D, provider, op, mode, device=DEVICE):
     """Benchmark cudagrad LayerNorm module vs PyTorch."""
-    B, N = 32, 2048
+    B, N = 8, 512
     x = torch.randn((B, N, D), dtype=torch.float32, device=device) * 0.02
     weight = torch.randn((D,), dtype=torch.float32, device=device) * 0.02
     bias = torch.randn((D,), dtype=torch.float32, device=device) * 0.02
@@ -455,7 +455,7 @@ def generate_flashattention_configs(ops):
             configs.append(
                 triton.testing.Benchmark(
                     x_names=['N'],
-                    x_vals=[512 * i for i in range(1, 17, 1)],
+                    x_vals=[128 * i for i in range(1, 9, 1)],
                     line_arg='provider',
                     line_vals=['torch', 'cuda'],
                     line_names=['PyTorch', 'CUDA'],
@@ -470,7 +470,7 @@ def generate_flashattention_configs(ops):
 @triton.testing.perf_report(flashattention_configs)
 def benchmark_flashattention(N, provider, op, mode, device=DEVICE):
     """Benchmark cudagrad FlashAttention module vs PyTorch SDPA."""
-    B, H, Dh = 32, 4, 128
+    B, H, Dh = 4, 4, 64
     scale = 1.0 / sqrt(Dh)
     q = torch.randn((B, H, N, Dh), dtype=torch.float32, device=device) * 0.02
     k = torch.randn((B, H, N, Dh), dtype=torch.float32, device=device) * 0.02
@@ -533,8 +533,9 @@ if __name__ == "__main__":
         parser.print_help()
         exit(0)
 
-    print("ATTENTION:\nBENCHMARK SIZES ARE DESIGNED TO FUNCTION WITHIN A LIMIT OF 16GB of VRAM.\n"
-          "IF YOU HAVE LESS YOU WILL GET ERRORS.\nTO FIX, EDIT x_vals IN EACH BENCHMARK'S CONFIG.")
+    print("ATTENTION:\nBenchmark sizes are tuned to fit within ~8GB of VRAM (and to keep the\n"
+          "naive cudagrad kernels' runtimes reasonable). On a smaller card, or to push to a\n"
+          "bigger one, edit the x_vals (and the fixed B/N/Dh dims) in each benchmark's config.")
 
     unary_ops_args = get_unary_ops_args(args)
     if unary_ops_args:
