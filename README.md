@@ -37,8 +37,8 @@ the purpose of this lesson is for absolute beginners with a programming (as oppo
 ## minigrad
 the purpose of this lesson is for people already confident with linear algebra and calculus to learn exactly what's happening in GPTs all the way from the barebones autograd engine and up to the GPT operations itself. to make this happen we'll be doing everything with numpy arrays, meaning that the basic unit of our engine will be tensors as opposed to individual values
 ##### TODO:
-- [ ] make model output logits & celoos do softmax within so that inference can do softmax
-- [ ] build a way to test against pytorch (or maybe against micrograd or autograd, that sounds easier)
+- [x] make model output logits & celoos do softmax within so that inference can do softmax
+- [x] build a way to test against pytorch (or maybe against micrograd or autograd, that sounds easier)
 - [ ] write jupyter notebook guide
 - [ ] make video
 
@@ -59,8 +59,8 @@ Personally I'm on a Mac so i plan on doing all my work on a cloud provider like 
 - [x] begin learning Triton
 	- [ ] ~~realize i'm in way over my head~~ *PSYC DAT SHIT WAS EASY*
 		- [ ] ~~abandon project lmao~~
-- [ ] engine.py
-	- [ ] TritonTensor class
+- [x] engine.py
+	- [x] TritonTensor class
 		- [x] __init__
 		- [x] __add__
 			- [x] figure out broadcasting
@@ -72,16 +72,16 @@ Personally I'm on a Mac so i plan on doing all my work on a cloud provider like 
 	- [x] the rest of the ops
     	- [ ] clean up the if statement logic
 	- [x] autotuning
-    	- [ ] fix bwd pass tests incompatibility w/ autotuning
+    	- [x] fix bwd pass tests incompatibility w/ autotuning
 - [ ] benchmarking.py
 	- [x] add new hadamards
 	- [x] make x-axis "size" mean something
 	- [x] make individual benchmarks callable
 	- [ ] make maximum input size either an input arg or smart enough not to max out ram on a given GPU. maybe pull HBM size and calculate?
 	- [ ] combine all hadamard tests into one
-- [ ] nn.py
-- [ ] model.py
-- [ ] train.py
+- [x] nn.py
+- [x] model.py
+- [x] train.py
 
 ## autograd (CUDA)
 the lowest tier. where the Triton lesson writes the forward/backward math as tile-level Triton kernels, [`cudagrad/`](cudagrad/) writes it one step lower as **raw CUDA C++ kernels** (JIT-compiled via `torch.utils.cpp_extension.load`), so you can see exactly what the GPU hardware is doing. same educational goal as every tier: just enough of an autograd engine to build a GPT. it mirrors `tritongrad/` op-for-op — `CudaTensor` wraps a `torch.float32` CUDA tensor for memory but runs every operation's math in our own `.cu` kernels. complete and GPU-verified: all 16 ops and 4 modules pass the repo-wide suite against PyTorch (`pytest tests/ -k cudagrad` → 20/20), with `model.py`/`train.py`/`benchmarking.py` mirroring the Triton tier. requires an NVIDIA GPU + CUDA toolkit (`nvcc`); see [`cudagrad/README.md`](cudagrad/README.md) for details.
