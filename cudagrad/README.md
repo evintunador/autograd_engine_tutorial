@@ -47,7 +47,15 @@ pytest tests/ -k cudagrad -v
 
 ## Status
 
-Scaffold: the elementwise **binary** op (`add`/`sub`/`mul`/`div`) is implemented
-fwd + bwd; only `add` is enabled in the adapter so far. Remaining kernel groups
-(unary, matmul, reductions + softmax, embedding/layernorm, flash attention) plus
-`model.py`/`train.py` and `benchmarking.py` are forthcoming — see the project plan.
+Complete and GPU-verified. All 16 ops and 4 modules pass the repo-wide suite
+against PyTorch (`pytest tests/ -k cudagrad` → 20/20). Kernel groups:
+`elementwise.cu` (binary add/sub/mul/div + unary exp/log/relu/neg),
+`vectorwise.cu` (sum/mean/max/min/var/std + softmax), `matmul.cu` (batched +
+shared-weight, enables `linear`), `modules.cu` (embedding + layernorm), and
+`flash_attention.cu` (a non-tiled causal attention — a correctness reference, not
+tritongrad's tiled online-softmax flash; a candidate for a future upgrade).
+
+`model.py` builds a GPT from `nn.py`; `train.py` trains it char-level on
+`../input.txt` (`cd cudagrad && python train.py`). `benchmarking.py` compares the
+CUDA kernels against PyTorch (`cd cudagrad && python benchmarking.py --all`,
+writing CSV/PNG to `benchmarks/`).
