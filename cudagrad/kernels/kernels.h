@@ -54,6 +54,28 @@ void softmax_forward(torch::Tensor x, torch::Tensor out,
 void softmax_backward(torch::Tensor y, torch::Tensor dx, torch::Tensor dout,
                       int64_t n_rows, int64_t n_cols);
 
+// ---- modules: embedding + layernorm ---------------------------------------
+// Embedding: tokens is contiguous int64 viewed flat as (B*N) ids; weight/out
+// are (V, D)/(B*N, D) fp32. forward writes out[row,:] = weight[tokens[row],:];
+// backward SCATTER-ADDs dout into dweight[tokens[row],:] via atomicAdd (rows can
+// share a token id), so dweight must start zeroed.
+void embedding_forward(torch::Tensor tokens, torch::Tensor weight,
+                       torch::Tensor out, int64_t N, int64_t D, int64_t V);
+void embedding_backward(torch::Tensor tokens, torch::Tensor dweight,
+                        torch::Tensor dout, int64_t N, int64_t D, int64_t V);
+
+// LayerNorm: x/out are (rows, D) fp32; w/b are (D,). forward computes mean[r]/
+// rstd[r] (population /D var) and stores them for backward. backward ACCUMULATES
+// into dx (`+=`, per-row, no race) and into dw/db via atomicAdd (summed across
+// rows); all grad buffers must start zeroed. eps comes in as double (cast to
+// float). `b` is taken for call-site symmetry but unused by the backward math.
+void layernorm_forward(torch::Tensor x, torch::Tensor w, torch::Tensor b,
+                       torch::Tensor out, torch::Tensor mean, torch::Tensor rstd,
+                       int64_t rows, int64_t D, double eps);
+void layernorm_backward(torch::Tensor x, torch::Tensor w, torch::Tensor b,
+                        torch::Tensor dx, torch::Tensor dout, torch::Tensor dw,
+                        torch::Tensor db, torch::Tensor mean, torch::Tensor rstd,
+                        int64_t rows, int64_t D);
+
 // ---- (future kernel groups declare their launchers below) -----------------
-// matmul (fwd / bwd_dA / bwd_dB) -> matmul.cu
-// embedding + layernorm          -> modules.cu
+// flash attention -> flash_attention.cu

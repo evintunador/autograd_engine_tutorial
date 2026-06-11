@@ -32,7 +32,7 @@ _SOURCES = [
     os.path.join(_KDIR, "elementwise.cu"),
     os.path.join(_KDIR, "matmul.cu"),         # matmul phase
     os.path.join(_KDIR, "vectorwise.cu"),     # reductions + softmax phase
-    # os.path.join(_KDIR, "modules.cu"),      # embedding + layernorm phase
+    os.path.join(_KDIR, "modules.cu"),        # embedding + layernorm phase
 ]
 
 _ext = None
@@ -121,20 +121,26 @@ def softmax_backward(out, dx, dout, n_rows, n_cols):
     _get_ext().softmax_backward(out, dx, dout, n_rows, n_cols)
 
 
-def embedding_forward(*args, **kwargs):
-    raise NotImplementedError("embedding not implemented yet")
+# --- modules: embedding + layernorm ----------------------------------------
+# embedding backward scatter-adds into a zeroed dweight (atomic; rows may share a
+# token id). layernorm forward saves mean/rstd for backward; backward accumulates
+# into zeroed dx (`+=`) and dw/db (atomic across rows). var uses population (/D).
 
 
-def embedding_backward(*args, **kwargs):
-    raise NotImplementedError("embedding not implemented yet")
+def embedding_forward(tokens, weight, out, N, D, V):
+    _get_ext().embedding_forward(tokens, weight, out, N, D, V)
 
 
-def layernorm_forward(*args, **kwargs):
-    raise NotImplementedError("layernorm not implemented yet")
+def embedding_backward(tokens, dweight, dout, N, D, V):
+    _get_ext().embedding_backward(tokens, dweight, dout, N, D, V)
 
 
-def layernorm_backward(*args, **kwargs):
-    raise NotImplementedError("layernorm not implemented yet")
+def layernorm_forward(x, w, b, out, mean, rstd, rows, D, eps):
+    _get_ext().layernorm_forward(x, w, b, out, mean, rstd, rows, D, eps)
+
+
+def layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D):
+    _get_ext().layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D)
 
 
 def flash_attention_forward(*args, **kwargs):

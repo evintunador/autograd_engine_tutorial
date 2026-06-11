@@ -41,4 +41,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "last-dim numerically-stable softmax forward");
     m.def("softmax_backward", &softmax_backward,
           "last-dim softmax backward (accumulates into dx)");
+
+    // modules: embedding + layernorm
+    m.def("embedding_forward", &embedding_forward,
+          "embedding forward: out[row,:] = weight[tokens[row],:]");
+    m.def("embedding_backward", &embedding_backward,
+          "embedding backward: scatter-add dout into dweight (atomic)");
+    m.def("layernorm_forward", &layernorm_forward,
+          "layernorm forward (population var; saves mean/rstd)");
+    m.def("layernorm_backward", &layernorm_backward,
+          "layernorm backward (accumulates dx; atomic dw/db across rows)");
 }

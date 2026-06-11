@@ -26,7 +26,7 @@ class CudagradAdapter(AdapterABC):
     OPS = {"add", "exp", "log", "relu", "neg", "matmul",
            "softmax", "sum_lastdim", "mean", "var", "std",
            "max_lastdim", "min_lastdim"}
-    MODULES = {"linear"}
+    MODULES = {"linear", "embedding", "layernorm"}
     # matmul/linear/attention accumulate at fp32 and are sensitive, same as
     # tritongrad — pre-seed the loosened tolerances so enabling them is one edit.
     tol_overrides = {
