@@ -10,6 +10,7 @@
 #  no usable CUDA GPU is present.)
 matplotlib
 numpy
+pandas      # used by triton.testing.perf_report (benchmarking.py CSV/plot output)
 pytest
 torch
 triton

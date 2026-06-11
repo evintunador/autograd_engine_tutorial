@@ -1,0 +1,160 @@
+"""Python wrappers around cudagrad's compiled CUDA extension (``cudagrad_ext``).
+
+The real math lives as ``.cu``/``.cpp`` sources under ``kernels/`` and is
+JIT-compiled by ``torch.utils.cpp_extension.load`` on first use (the first call
+is slow — nvcc compiles, just like Triton's first-call JIT). Compiled artifacts
+are cached by torch under ``~/.cache/torch_extensions`` (outside the repo).
+
+Why this module is named ``cuda_kernels`` and never ``kernels``: tritongrad's
+``engine.py`` does ``from kernels import ...``, which leaks a top-level
+``kernels`` module into ``sys.modules`` that is never cleaned up. On a GPU box
+where both backends are imported, a cudagrad ``import kernels`` would silently
+resolve to *tritongrad's* package. So ``kernels/`` here is a pure source
+directory (no ``__init__.py``, never imported as Python) and the build glue +
+wrappers live under the unique name ``cuda_kernels`` (extension name
+``cudagrad_ext``). This sidesteps the collision entirely — see the project plan.
+
+Each op group gets a tiny wrapper here. Groups not yet implemented raise
+``NotImplementedError`` so the engine methods can exist and import cleanly while
+their ops simply stay out of the adapter's ``OPS``/``MODULES`` (and thus skip).
+"""
+import os
+
+from torch.utils.cpp_extension import load
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_KDIR = os.path.join(_HERE, "kernels")
+
+# Source list. Each kernel-group phase appends its .cu file here (bindings.cpp
+# always stays first — it's the single pybind entry point).
+_SOURCES = [
+    os.path.join(_KDIR, "bindings.cpp"),
+    os.path.join(_KDIR, "elementwise.cu"),
+    os.path.join(_KDIR, "matmul.cu"),         # matmul phase
+    os.path.join(_KDIR, "vectorwise.cu"),     # reductions + softmax phase
+    os.path.join(_KDIR, "modules.cu"),        # embedding + layernorm phase
+    os.path.join(_KDIR, "flash_attention.cu"),  # causal attention phase
+]
+
+_ext = None
+
+
+def _get_ext():
+    """Lazily JIT-compile and return the cudagrad CUDA extension module."""
+    global _ext
+    if _ext is None:
+        _ext = load(
+            name="cudagrad_ext",
+            sources=_SOURCES,
+            extra_include_paths=[_KDIR],
+            verbose=True,
+        )
+    return _ext
+
+
+# --- elementwise binary (add / sub / mul / div) ----------------------------
+_BINARY_OP = {"add": 0, "sub": 1, "mul": 2, "div": 3}
+
+
+def binary_forward(x, y, out, loop_stride, op):
+    _get_ext().binary_forward(x, y, out, loop_stride, _BINARY_OP[op])
+
+
+def binary_backward_dx(y, dx, dout, loop_stride, op):
+    _get_ext().binary_backward_dx(y, dx, dout, loop_stride, _BINARY_OP[op])
+
+
+def binary_backward_dy(x, y, dy, dout, loop_stride, op):
+    _get_ext().binary_backward_dy(x, y, dy, dout, loop_stride, _BINARY_OP[op])
+
+
+# --- elementwise unary (exp / log / relu / neg) ----------------------------
+_UNARY_OP = {"exp": 0, "log": 1, "relu": 2, "neg": 3}
+
+
+def unary_forward(x, out, op):
+    _get_ext().unary_forward(x, out, _UNARY_OP[op])
+
+
+def unary_backward(x, dx, out, dout, op):
+    _get_ext().unary_backward(x, dx, out, dout, _UNARY_OP[op])
+
+
+# --- not yet implemented (filled in by later kernel phases) ----------------
+
+
+# --- matmul (forward / backward dA / backward dB) --------------------------
+# Launchers read all shapes from the tensors and detect the B layout (batched
+# vs shared-2D) from b.dim() vs a.dim(); these wrappers take only tensors.
+
+
+def matmul_forward(a, b, out):
+    _get_ext().matmul_forward(a, b, out)
+
+
+def matmul_backward_dA(b, dA, dout):
+    _get_ext().matmul_backward_dA(b, dA, dout)
+
+
+def matmul_backward_dB(a, dB, dout):
+    _get_ext().matmul_backward_dB(a, dB, dout)
+
+
+# --- vectorwise: last-dim reductions (sum/mean/max/min/var/std) ------------
+# var/std use population (/n) normalization, matching torch.var/std(unbiased=False).
+_REDUCTION_OP = {"sum": 0, "mean": 1, "max": 2, "min": 3, "var": 4, "std": 5}
+
+
+def reduction_forward(x, out, n_rows, n_cols, op):
+    _get_ext().reduction_forward(x, out, n_rows, n_cols, _REDUCTION_OP[op])
+
+
+def reduction_backward(x, dx, dout, out, n_rows, n_cols, op):
+    _get_ext().reduction_backward(x, dx, dout, out, n_rows, n_cols,
+                                  _REDUCTION_OP[op])
+
+
+def softmax_forward(x, out, n_rows, n_cols):
+    _get_ext().softmax_forward(x, out, n_rows, n_cols)
+
+
+def softmax_backward(out, dx, dout, n_rows, n_cols):
+    _get_ext().softmax_backward(out, dx, dout, n_rows, n_cols)
+
+
+# --- modules: embedding + layernorm ----------------------------------------
+# embedding backward scatter-adds into a zeroed dweight (atomic; rows may share a
+# token id). layernorm forward saves mean/rstd for backward; backward accumulates
+# into zeroed dx (`+=`) and dw/db (atomic across rows). var uses population (/D).
+
+
+def embedding_forward(tokens, weight, out, N, D, V):
+    _get_ext().embedding_forward(tokens, weight, out, N, D, V)
+
+
+def embedding_backward(tokens, dweight, dout, N, D, V):
+    _get_ext().embedding_backward(tokens, dweight, dout, N, D, V)
+
+
+def layernorm_forward(x, w, b, out, mean, rstd, rows, D, eps):
+    _get_ext().layernorm_forward(x, w, b, out, mean, rstd, rows, D, eps)
+
+
+def layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D):
+    _get_ext().layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D)
+
+
+# --- flash attention: causal attention (forward / backward) ----------------
+# CAUSAL (query i attends keys j<=i). forward fills O and stores the per-row
+# logsumexp LSE for reuse in backward. backward accumulates into zeroed
+# dQ/dK/dV (no atomics — each thread owns a distinct output row). `scale` is the
+# multiplier (= sqrt(D) in the suite), used verbatim.
+
+
+def flash_attention_forward(Q, K, V, O, LSE, scale, B, H, N, D):
+    _get_ext().flash_attention_forward(Q, K, V, O, LSE, scale, B, H, N, D)
+
+
+def flash_attention_backward(Q, K, V, O, dO, dQ, dK, dV, LSE, scale, B, H, N, D):
+    _get_ext().flash_attention_backward(Q, K, V, O, dO, dQ, dK, dV, LSE,
+                                        scale, B, H, N, D)
