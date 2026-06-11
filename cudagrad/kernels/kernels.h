@@ -77,5 +77,19 @@ void layernorm_backward(torch::Tensor x, torch::Tensor w, torch::Tensor b,
                         torch::Tensor db, torch::Tensor mean, torch::Tensor rstd,
                         int64_t rows, int64_t D);
 
-// ---- (future kernel groups declare their launchers below) -----------------
-// flash attention -> flash_attention.cu
+// ---- flash attention: causal attention fwd + bwd --------------------------
+// Q/K/V/O/dO/dQ/dK/dV are (B,H,N,D) contiguous fp32; LSE is (B,H,N) scratch.
+// CAUSAL: query i attends only to keys j<=i. score s_ij = scale*(Q_i.K_j) with
+// `scale` the multiplier passed in (used verbatim). forward fills O and stores
+// the per-row logsumexp LSE for reuse in backward. backward ACCUMULATES into
+// dQ/dK/dV (`+=`), so callers pass zeroed grads; each thread owns a distinct
+// output row, so NO atomics. The Delta scratch is allocated inside the backward
+// launcher. scale arrives as double (cast to float inside the kernels).
+void flash_attention_forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+                             torch::Tensor O, torch::Tensor LSE, double scale,
+                             int64_t B, int64_t H, int64_t N, int64_t D);
+void flash_attention_backward(torch::Tensor Q, torch::Tensor K, torch::Tensor V,
+                              torch::Tensor O, torch::Tensor dO,
+                              torch::Tensor dQ, torch::Tensor dK, torch::Tensor dV,
+                              torch::Tensor LSE, double scale,
+                              int64_t B, int64_t H, int64_t N, int64_t D);

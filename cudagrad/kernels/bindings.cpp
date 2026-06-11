@@ -51,4 +51,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "layernorm forward (population var; saves mean/rstd)");
     m.def("layernorm_backward", &layernorm_backward,
           "layernorm backward (accumulates dx; atomic dw/db across rows)");
+
+    // flash attention: causal attention forward + backward
+    m.def("flash_attention_forward", &flash_attention_forward,
+          "causal attention forward (fills O; stores per-row LSE)");
+    m.def("flash_attention_backward", &flash_attention_backward,
+          "causal attention backward (accumulates dQ/dK/dV; recomputes P from LSE)");
 }

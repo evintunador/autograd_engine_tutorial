@@ -33,6 +33,7 @@ _SOURCES = [
     os.path.join(_KDIR, "matmul.cu"),         # matmul phase
     os.path.join(_KDIR, "vectorwise.cu"),     # reductions + softmax phase
     os.path.join(_KDIR, "modules.cu"),        # embedding + layernorm phase
+    os.path.join(_KDIR, "flash_attention.cu"),  # causal attention phase
 ]
 
 _ext = None
@@ -143,9 +144,17 @@ def layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D):
     _get_ext().layernorm_backward(x, w, b, dx, dout, dw, db, mean, rstd, rows, D)
 
 
-def flash_attention_forward(*args, **kwargs):
-    raise NotImplementedError("flash attention not implemented yet")
+# --- flash attention: causal attention (forward / backward) ----------------
+# CAUSAL (query i attends keys j<=i). forward fills O and stores the per-row
+# logsumexp LSE for reuse in backward. backward accumulates into zeroed
+# dQ/dK/dV (no atomics — each thread owns a distinct output row). `scale` is the
+# multiplier (= sqrt(D) in the suite), used verbatim.
 
 
-def flash_attention_backward(*args, **kwargs):
-    raise NotImplementedError("flash attention not implemented yet")
+def flash_attention_forward(Q, K, V, O, LSE, scale, B, H, N, D):
+    _get_ext().flash_attention_forward(Q, K, V, O, LSE, scale, B, H, N, D)
+
+
+def flash_attention_backward(Q, K, V, O, dO, dQ, dK, dV, LSE, scale, B, H, N, D):
+    _get_ext().flash_attention_backward(Q, K, V, O, dO, dQ, dK, dV, LSE,
+                                        scale, B, H, N, D)
