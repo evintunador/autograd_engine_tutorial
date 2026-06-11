@@ -26,8 +26,12 @@ inline int64_t n_blocks(int64_t n) { return (n + THREADS - 1) / THREADS; }
 
 // ---- embedding ------------------------------------------------------------
 // out[row, d] = weight[tokens[row], d]   (one thread per (row, d) element)
-// tokens is viewed flat as `rows` int64 ids; out/weight are (rows, D)/(V, D).
-__global__ void embedding_forward_kernel(const int64_t* __restrict__ tokens,
+// tokens is viewed flat as `rows` ids; out/weight are (rows, D)/(V, D).
+// NOTE: the engine is fp32-only (CudaTensor.__init__ forces float32), so token
+// ids arrive as FLOATS — we cast back to int for indexing, exactly like
+// tritongrad. Ids are exact small integers (< 2^24), so the cast is lossless;
+// they're range-checked in nn.Embedding before we get here.
+__global__ void embedding_forward_kernel(const float* __restrict__ tokens,
                                         const float* __restrict__ weight,
                                         float* __restrict__ out,
                                         int64_t rows, int64_t D, int64_t V) {
@@ -35,14 +39,14 @@ __global__ void embedding_forward_kernel(const int64_t* __restrict__ tokens,
     if (i >= rows * D) return;
     int64_t row = i / D;
     int64_t d = i % D;
-    int64_t t = tokens[row];
+    int64_t t = (int64_t)llroundf(tokens[row]);
     out[row * D + d] = weight[t * D + d];
 }
 
 // dweight[tokens[row], d] += dout[row, d]   (scatter-add; one thread per (row,d))
 // Multiple rows can share a token id, so the accumulation into the shared
-// embedding row MUST be atomic.
-__global__ void embedding_backward_kernel(const int64_t* __restrict__ tokens,
+// embedding row MUST be atomic. (tokens float -> int, as in the forward.)
+__global__ void embedding_backward_kernel(const float* __restrict__ tokens,
                                          float* __restrict__ dweight,
                                          const float* __restrict__ dout,
                                          int64_t rows, int64_t D, int64_t V) {
@@ -50,7 +54,7 @@ __global__ void embedding_backward_kernel(const int64_t* __restrict__ tokens,
     if (i >= rows * D) return;
     int64_t row = i / D;
     int64_t d = i % D;
-    int64_t t = tokens[row];
+    int64_t t = (int64_t)llroundf(tokens[row]);
     atomicAdd(&dweight[t * D + d], dout[row * D + d]);
 }
 
@@ -139,7 +143,7 @@ void embedding_forward(torch::Tensor tokens, torch::Tensor weight,
                        torch::Tensor out, int64_t N, int64_t D, int64_t V) {
     int64_t rows = tokens.numel();  // B*N
     embedding_forward_kernel<<<n_blocks(rows * D), THREADS>>>(
-        tokens.data_ptr<int64_t>(), weight.data_ptr<float>(),
+        tokens.data_ptr<float>(), weight.data_ptr<float>(),
         out.data_ptr<float>(), rows, D, V);
 }
 
@@ -147,7 +151,7 @@ void embedding_backward(torch::Tensor tokens, torch::Tensor dweight,
                         torch::Tensor dout, int64_t N, int64_t D, int64_t V) {
     int64_t rows = tokens.numel();  // B*N
     embedding_backward_kernel<<<n_blocks(rows * D), THREADS>>>(
-        tokens.data_ptr<int64_t>(), dweight.data_ptr<float>(),
+        tokens.data_ptr<float>(), dweight.data_ptr<float>(),
         dout.data_ptr<float>(), rows, D, V);
 }
 
