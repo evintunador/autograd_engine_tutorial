@@ -1,4 +1,5 @@
-# Unpinned — install the latest compatible versions.
+# CPU-side deps are pinned to known-good versions; torch & triton are left
+# unpinned because the right build depends on your NVIDIA card's CUDA wheel.
 #
 # NOTE on GPUs: tritongrad needs a torch build with kernels for your card's
 # compute capability. On newer NVIDIA GPUs (Blackwell / RTX 50-series, sm_120+)
