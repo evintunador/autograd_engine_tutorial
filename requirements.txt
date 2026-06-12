@@ -8,12 +8,12 @@
 #   pip install --index-url https://download.pytorch.org/whl/cu128 torch triton
 # (micrograd & minigrad are CPU-only and don't care; tritongrad tests skip when
 #  no usable CUDA GPU is present.)
-matplotlib
-numpy
-pandas      # used by triton.testing.perf_report (benchmarking.py CSV/plot output)
-pytest
+matplotlib==3.9.3
+numpy==1.26.4
+pandas==2.2.2      # used by triton.testing.perf_report (benchmarking.py CSV/plot output)
+pytest==7.4.4
 torch
 triton
-mlx         # Apple Silicon only — powers mlxgrad's Metal kernels. On other hosts
+mlx==0.31.2         # Apple Silicon only — powers mlxgrad's Metal kernels. On other hosts
             # pip finds no wheel; that's fine, the mlxgrad tests skip (see
             # tests/adapters/mlxgrad_adapter.py::available).
