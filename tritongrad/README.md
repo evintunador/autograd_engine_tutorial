@@ -5,8 +5,16 @@ Unfortunately unlike micrograd and minigrad, we will not actually be starting fr
 
 > **Testing:** correctness checks now live in the repo-wide [`../tests/`](../tests/) suite (run `pytest tests/ -k tritongrad` on a CUDA host). The original `testing.py` harness here still works but is superseded by it; its heatmap visualization was ported into `tests/core/heatmaps.py`.
 
+## file guide
+- `engine.py`: the `TritonTensor` autograd graph + topo-sorted `backward()`; each op launches a Triton kernel
+- `nn.py`: the building-block modules (Linear, Embedding, LayerNorm, attention, etc.)
+- `model.py`: assembles the modules into a small GPT
+- `train.py`: trains a tiny autoregressive GPT char-level on `../input.txt`
+- `benchmarking.py`: times the Triton kernels against PyTorch
+- `kernels/`: the Triton forward/backward kernels (the tutorial content)
+
 ## why triton?
-You might be asking: why are we using Triton instead of CUDA? I'm open to the idea of learning and then doing a lesson on CUDA (and MPS for that matter) in the future, but for now here are the pros and cons that it came down to:
+You might be asking: why are we using Triton instead of CUDA? (Both the [CUDA](../cudagrad) and [Metal/MLX](../mlxgrad) tiers exist for that — this tier is the tile-level middle ground.) Here are the pros and cons that it came down to:
 
 |      | triton                                                                                            | cuda                                                             |
 | ---- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
