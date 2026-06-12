@@ -97,6 +97,7 @@ __pycache__/
 # generated benchmark outputs (keep the dirs via .gitkeep, ignore the plots/CSVs)
 */benchmarks/*.csv
 */benchmarks/*.png
+*/benchmarks/*.html
 
 # agent-local (Claude Code worktrees, settings) — never part of the project
 .claude/
